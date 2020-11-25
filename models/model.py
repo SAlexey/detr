@@ -56,9 +56,9 @@ class ModelMetricsAndLogging(pl.Callback):
         }, on_step=on_step, on_epoch=on_epoch)
 
         for i, metric in enumerate(getattr(self, f"{prefix}_metrics", [])):
-            metric_name = getattr(metric, "name", f"{prefix}_metric_{i}")
+            metric_name = getattr(metric, 'name', f'metric_{i}')
             metric(outputs["output"], batch)
-            pl_module.log(metric_name, metric, on_step=on_step, on_epoch=on_epoch)
+            pl_module.log(f"{prefix}_{metric_name}", metric, on_step=on_step, on_epoch=on_epoch)
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, *args, **kwargs):
         self.common_log(pl_module, outputs, batch, prefix="training")
