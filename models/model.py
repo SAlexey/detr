@@ -50,13 +50,30 @@ class ModelMetricsAndLogging(pl.Callback):
         self.test_metrics = test_metrics
 
     def common_log(self, pl_module, outputs, batch, on_step=True, on_epoch=True, prefix=""):
+        """
+        Common Log for all training, validation and test steps
+        Logs total loss as well as separate loss components
+        Args:
+            pl_module: LightningModule
+            outputs: (dict) a dictionary containing following key, value pairs:
+                loss_dict: (dict) a dictionary containing loss components
+                loss: (float) total loss calculated form the loss_dict
+                output: (dict) a dictionary containing model predictions
+            batch: (tuple, n=2) a tuple with elements
+                0: (tensor)  model inputs
+                1: (tuple, n=batch_size) n dictionaries containing targets 
+        KWargs:
+            on_step: (bool, default=True) log on each step
+            on_epoch: (bool, default=True) log reduced value on each epoch
+            prefix: (string) a prefix prepended to each logged value e.g [training_, validation_, test_]
+        """
         pl_module.log(f"{prefix}_loss", outputs["loss"], on_step=on_step, on_epoch=on_epoch)
         pl_module.log_dict({
             f"{prefix}_{k}": v for k, v in outputs["loss_dict"].items()
         }, on_step=on_step, on_epoch=on_epoch)
 
         for i, metric in enumerate(getattr(self, f"{prefix}_metrics", [])):
-            metric_name = getattr(metric, 'name', f'metric_{i}')
+            metric_name = getattr(metric, "name", f"metric_{i}")
             metric(outputs["output"], batch)
             pl_module.log(f"{prefix}_{metric_name}", metric, on_step=on_step, on_epoch=on_epoch)
 
