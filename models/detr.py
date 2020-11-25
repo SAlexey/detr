@@ -20,10 +20,11 @@ from .transformer import build_transformer
 
 class DETR(nn.Module):
     """ This is the DETR module that performs object detection """
-    def __init__(self, backbone, transformer, num_classes, num_queries, aux_loss=False):
+    def __init__(self, backbone, input_proj, transformer, num_classes, num_queries, aux_loss=False):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
+            input_proj: torch.module that projects backbone output to the transformer input
             transformer: torch module of the transformer architecture. See transformer.py
             num_classes: number of object classes
             num_queries: number of object queries, ie detection slot. This is the maximal number of objects
@@ -37,7 +38,7 @@ class DETR(nn.Module):
         self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
-        self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
+        self.input_proj = input_proj
         self.backbone = backbone
         self.aux_loss = aux_loss
 
