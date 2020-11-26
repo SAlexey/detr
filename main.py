@@ -1,3 +1,4 @@
+from datasets.data import MRIDataModule
 import os
 import time
 from argparse import ArgumentParser
@@ -15,6 +16,7 @@ def get_argparse_args():
     parser = MeDeCl.add_argparse_args(parser)
 
     parser.add_argument("--experiment_name", default=f"Exp-{time.strftime('%d%M%YT%H:%m')}")
+    parser.add_argument("--datadir", type=str, required=True)
     args = parser.parse_args()
 
     return args
@@ -23,7 +25,7 @@ def main():
     args = get_argparse_args()
     
     model = MeDeCl(args)
-    data = None # TODO
+    data = MRIDataModule(args)
     logger = pl.loggers.TensorBoardLogger(name=args.experiment_name)
 
     checkpoint_dirpath = os.path.join(args.weights_save_path, logger.name)

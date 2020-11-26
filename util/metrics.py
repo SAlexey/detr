@@ -1,7 +1,8 @@
-from typing import Tuple, Dict
+from typing import Dict, Tuple
+
 import pytorch_lightning as pl
 import torch
-from torch import Tensor 
+from torch import Tensor
 
 
 class MeanAveragePrecision(pl.metrics.Metric):
