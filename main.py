@@ -23,6 +23,7 @@ def main():
     args = get_argparse_args()
     
     model = MeDeCl(args)
+    data = None # TODO
     logger = pl.loggers.TensorBoardLogger(name=args.experiment_name)
 
     checkpoint_dirpath = os.path.join(args.weights_save_path, logger.name)
@@ -31,17 +32,19 @@ def main():
         os.mkdir(checkpoint_dirpath)
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        dirpath=checkpoint_dirpath,
-        filename="{epoch}_{validation_loss:.3f}"
-    )
+            dirpath=checkpoint_dirpath,
+            filename="{epoch}_{validation_loss:.3f}"
+        )
 
     metrics_callback = MeDeClMetricsAndLogging()
 
     trainer = pl.Trainer.from_argparse_args(
             args,
             logger=logger,
-            callbacks=[checkpoint_callback]
+            callbacks=[checkpoint_callback, metrics_callback]
         )
+
+    trainer.fit(model, datamodule=data)
 
 if __name__ == "__main__":
     main()

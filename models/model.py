@@ -52,6 +52,7 @@ class ModelBase(pl.LightningModule):
         parser.add_argument("--lr", type=float, default=1e-4)
         parser.add_argument("--num_workers", type=int, default=1)
         return parser
+        
 
 class MeDeCl(ModelBase):
     def __init__(self, args) -> None:

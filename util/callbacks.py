@@ -6,9 +6,9 @@ class ModelMetricsAndLoggingBase(pl.callbacks.Callback):
 
     def __init__(
             self, 
-            training_metrics:List[Callable]=[], 
-            validation_metrics:List[Callable]=[], 
-            test_metrics:List[Callable]=[]
+            training_metrics:List[pl.metrics.Metric]=[], 
+            validation_metrics:List[pl.metrics.Metric]=[], 
+            test_metrics:List[pl.metrics.Metric]=[]
         ) -> None:
         self.training_metrics = training_metrics
         self.validation_metrics = validation_metrics
@@ -40,7 +40,7 @@ class ModelMetricsAndLoggingBase(pl.callbacks.Callback):
         for i, metric in enumerate(getattr(self, f"{prefix}_metrics", [])):
             metric_name = getattr(metric, "name", f"metric_{i}")
             metric(outputs["output"], batch)
-            pl_module.log(f"{prefix}_{metric_name}", metric, on_step=on_step, on_epoch=on_epoch)
+            pl_module.log(f"{prefix}_{metric_name}", metric, on_step=metric.compute_on_step, on_epoch=on_epoch)
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, *args, **kwargs):
         self.common_log(pl_module, outputs, batch, prefix="training")
