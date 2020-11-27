@@ -101,10 +101,6 @@ class MeDeCl(ModelBase):
             {"params": self.model.transformer.parameters(), "lr": self.hparams.lr_transformer}
         ], self.hparams.lr, weight_decay=self.hparams.weight_decay)
 
-    def validation_epoch_end(self, outputs: List[Any]) -> None:
-        postprocess = PostProcess()
-
-
 
     @staticmethod
     def add_argparse_args(parents: List[ArgumentParser]=[]):

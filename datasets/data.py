@@ -1,7 +1,9 @@
 from collections import defaultdict
+from argparse import Namespace
 import json
 from pathlib import Path
 from typing import Callable, Dict, Optional, OrderedDict, Tuple
+from pycocotools.coco import COCO
 
 from typing_extensions import TypeAlias
 from util.box_ops import box_xyxy_to_cxcywh, box_xyxy_to_cxcywh3d
@@ -58,23 +60,31 @@ class DataModuleBase(pl.LightningDataModule):
         if stage == "test" or stage is None:
             self.test_dataset = self.dataset(list((root/"test").iterdir()))
     
-TransformType: TypeAlias = Callable[[Tuple[torch.Tensor, Dict], Tuple[torch.Tensor, Dict]]]
+TransformType: TypeAlias = Callable[[Tuple[torch.Tensor, Dict]], Tuple[torch.Tensor, Dict]]
+
+def default_annotation():
+    return {
+        "info": {},
+        "images": [],
+        "annotations": []
+        }
 
 class MRIDataset(NPZDatasetBase):
 
     def __init__(self, *args, transform:Optional[TransformType]=None,  **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.transform = transform
-        self._cocoAnn = defaultdict(dict([
-            ("info", {}),
-            ("images", [])
-            ("annotations", []),
-        ]))
+        self._coco = {
+            "sag": COCO(),
+            "cor": COCO(),
+            "axi": COCO()
+        }
+        
     
     def __getitem__(self, idx):
         item = super().__getitem__(idx)
     
-        image = torch.FloatTensor(item.get("image")).unsqueeze(0)
+        image = torch.FloatTensor(item.get("image"))
         image_id = int(self.items[idx].stem)
         image_shape = image.shape[-3:]
 
@@ -93,38 +103,37 @@ class MRIDataset(NPZDatasetBase):
         return image, target
 
     @property
-    def coco_dict(self):
-        planes = (
-            ("sag", [1, 2, 4, 5]),
-            ("cor", [0, 1, 3, 4]), 
-            ("axi", [0, 2, 3, 5])
-        )
-        if self._cocoAnn is None:
-            for i in range(len(self)):
-                path = self.items[i]
-                image, targets = self[i]
-                image_id = int(path.stem)
-                for plane, dims in planes:
-                    annotation_set = self.cocoAnn[plane]
-                    annotation_set["images"].append( {
-                        "id" : image_id,
-                        "width": image.size(dims[0]), 
-                        "height": image.size(dims[1]), 
-                        "file_name" : path 
-                    })
-                    for box, label in zip(targets["boxes"], targets["labels"]):
-                        annotation_set["annotation"].append({
-                            "id" : len(annotation_set["annotation"]), 
-                            "image_id" : image_id, 
-                            "category_id" : label, 
-                            "area" : float, 
-                            "bbox" : box_xyxy_to_cxcywh3d(box[dims]),  #[x,y,width,height]
-                            "iscrowd" : 0,
-                        })
-        return self._cocoAnn
+    def coco(self):
+        return self._coco
 
 
 class MRIDataModule(DataModuleBase):
     def __init__(self, hparams) -> None: 
         dataset = MRIDataset
         super().__init__(hparams, dataset)
+
+    def setup(self, stage: Optional[str]):
+        super().setup(stage)
+        root = Path(self.hparams.datadir)
+
+        for each in ["train", "val", "test"]:
+            annotations = json.load(root / each /"annotation_by_plane.json")
+            loader = getattr(self, f"{each}_dataloader")()
+            for key, cocoset in loader.dataset.coco.items():
+                cocoset.dataset = annotations[key]
+                cocoset.createIndex()
+
+def main():
+    args = Namespace(
+        datadir="/scratch/visual/ashestak/oai/v00/numpy/full",
+        num_workers=1,
+        batch_size=1
+    )
+    datamodule = MRIDataModule(args)
+    datamodule.setup()
+    
+
+
+
+if __name__ == "__main__":
+    main()

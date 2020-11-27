@@ -5,13 +5,31 @@ COCO dataset which returns image_id for evaluation.
 Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
 """
 from pathlib import Path
+from pycocotools.coco import COCO
 
 import torch
 import torch.utils.data
 import torchvision
 from pycocotools import mask as coco_mask
+import json
+import time
+
 
 import datasets.transforms as T
+
+
+class COCOWrapper(COCO):
+
+    def __init__(self, annotation_file=None):
+        super().__init__(annotation_file=None)
+        if not annotation_file == None:
+            print('loading annotations into memory...')
+            tic = time.time()
+            dataset = json.load(annotation_file)
+            assert type(dataset)==dict, 'annotation file format {} not supported'.format(type(dataset))
+            print('Done (t={:0.2f}s)'.format(time.time()- tic))
+            self.dataset = dataset
+            self.createIndex()
 
 
 class CocoDetection(torchvision.datasets.CocoDetection):
