@@ -20,6 +20,13 @@ def box_xyxy_to_cxcywh(x):
     return torch.stack(b, dim=-1)
 
 
+def box_xyxy_to_cxcywh3d(x):
+    z0, x0, y0, z1, x1, y1 = x.unbind(-1)
+    b = [(z0 + z1)/ 2., (x0 + x1) / 2., (y0 + y1) / 2.,
+         (z1 - z0), (x1 - x0), (y1 - y0)]
+    return torch.stack(b, dim=-1)
+
+
 # modified from torchvision to also return the union
 def box_iou(boxes1, boxes2):
     area1 = box_area(boxes1)

@@ -1,5 +1,12 @@
-from typing import Callable, List
+import io
+import json
+
+import torch
+from datasets.coco_eval import CocoEvaluator
+from typing import List
 import pytorch_lightning as pl
+from models.detr import PostProcess
+from pycocotools.coco import COCO
 
 
 class ModelMetricsAndLoggingBase(pl.callbacks.Callback):
@@ -53,18 +60,45 @@ class ModelMetricsAndLoggingBase(pl.callbacks.Callback):
 
 
 class MeDeClMetricsAndLogging(ModelMetricsAndLoggingBase):
-    
-    def __init__(self) -> None:
-        training_metrics = [
 
-        ]
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.coco_evaluator = {}
+        self.postprocessors =  {'bbox': PostProcess()}
 
-        validation_metrics = [
+    def setup(self, trainer, pl_module, stage):
+        if stage == "fit" or stage is None:
+            coco_dict = pl_module.val_dataloader().dataset.coco_dict
+            for key, ann in coco_dict.items():
+                file_io = io.StringBuffer()
+                coco_gt = COCO(json.dump(ann, file_io))
+                self.coco_evaluator[key] = CocoEvaluator(coco_gt)
 
-        ]
 
-        test_metrics = [
+        if stage == "test" or stage is None:
+            coco_dict = pl_module.test_dataloader().dataset.coco_dict
+            for key, ann in coco_dict.items():
+                file_io = io.StringBuffer()
+                coco_gt = COCO(json.dump(ann, file_io))
+                self.coco_evaluator[key] = CocoEvaluator(coco_gt)
 
-        ]
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, *args, **kwargs):
+        inputs, targets = batch
+        
+        planes = (
+            ("sag", [1, 2, 4, 5]),
+            ("cor", [0, 1, 3, 4]), 
+            ("axi", [0, 2, 3, 5])
+        )
 
-        super().__init__(training_metrics, validation_metrics, test_metrics)
+        for plane, dims in planes:
+            orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
+            results = self.postprocessors['bbox'](outputs, orig_target_sizes)
+            res = {target['image_id'].item(): output for target, output in zip(targets, results)}
+            self.coco_evaluator[plane].update(res)
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        for key, coco_eval in self.coco_evaluator.items():
+            coco_eval.accumulate()
+            coco_eval.summarize()
+            

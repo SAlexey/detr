@@ -1,5 +1,8 @@
 from argparse import ArgumentParser, Namespace
-from models.detr import DETR, SetCriterion
+from pickle import NONE
+
+from numpy.lib.arraysetops import isin
+from models.detr import DETR, SetCriterion, PostProcess
 from models.matcher import build_matcher
 
 import torch
@@ -17,6 +20,11 @@ class ModelBase(pl.LightningModule):
         super.__init__()
         self.model = model
         self.criterion = criterion
+        weight_dict = getattr(self.criterion, "weight_dict")
+        
+        assert isinstance(weight_dict, dict)
+        assert weight_dict != {}
+        
         self.save_hyperparameters(hparams)
 
     def forward(self, *input: Any, **kwargs: Any) -> T_co:
@@ -26,8 +34,8 @@ class ModelBase(pl.LightningModule):
         return torch.optim.Adam(self.model.parameters(), self.hparams.lr)
 
     def reduce_loss(self, loss_dict):
-        weight = getattr(self.criterion, "weight_dict", {})
-        return sum((val * weight.get(key, 1) for key, val in loss_dict.items()))
+        weight = getattr(self.criterion, "weight_dict")
+        return sum(loss_dict[k] * weight[k] for k in loss_dict.keys() if k in weight)
 
     def common_step(self, batch):
         inputs, targets = batch
@@ -92,6 +100,11 @@ class MeDeCl(ModelBase):
             {"params": self.model.backbone.parameters(), "lr": self.hparams.lr_backbone},
             {"params": self.model.transformer.parameters(), "lr": self.hparams.lr_transformer}
         ], self.hparams.lr, weight_decay=self.hparams.weight_decay)
+
+    def validation_epoch_end(self, outputs: List[Any]) -> None:
+        postprocess = PostProcess()
+
+
 
     @staticmethod
     def add_argparse_args(parents: List[ArgumentParser]=[]):
