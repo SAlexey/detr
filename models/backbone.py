@@ -109,6 +109,23 @@ class Joiner(nn.Sequential):
         return out, pos
 
 
+class Joiner3D(nn.Sequential):
+
+    def __init__(self, backbone, position_embedding) -> None:
+        super().__init__(backbone, position_embedding)
+
+    def forward(self, tensor_list: NestedTensor):
+        xs = self[0](tensor_list)
+        out: List[NestedTensor] = []
+        pos = []
+        for name, x in xs.items():
+            out.append(x)
+            # position encoding
+            pos.append(self[1](x).to(x.tensors.dtype))
+
+        return out, pos
+
+
 def build_backbone(args):
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0
