@@ -65,7 +65,7 @@ def create_annotations(root):
         ret = dict(ret)
         ret["config"] = config
         print(f"writing annotations to {root / 'annotations.json'}")
-        json.dump(dict(ret), fp)
+        json.dump(ret, fp)
         print("done")
     return ret
 
