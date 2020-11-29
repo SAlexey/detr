@@ -14,53 +14,67 @@ def default_ann():
         "licences": []
     }
 
+def create_annotations(root):
+    
+    is_valid = lambda path: path.suffix == ".npz"
+    
+    ret = defaultdict(lambda: {
+        "images": [], 
+        "annotations": [], 
+        "categories": [{"id": 0, "name": "LM"}, {"id": 1, "name": "MM"}]
+    })
+
+    config = (
+        ("sag", (1, 2), [2, 3, 4, 5]), 
+        ("axi", (0, 2), [0, 1, 4, 5]), 
+        ("cor", (0, 1), [0, 1, 2, 3])
+    )
+
+    for each in root.iterdir():
+        if is_valid(each):
+            item = np.load(each)
+            inputs = item["image"]
+            boxes = item["boxes"]
+            labels = item["labels"]
+            shape = inputs.shape 
+            image_id = int(each.stem)
+
+            
+            for ax, (h, w), ind in config:
+                bbox = boxes[:, ind]
+                image = {
+                    "id": image_id,
+                    "width": shape[w],
+                    "height": shape[h],
+                }
+                annos = [
+                    {
+                        "id": len(ret[ax]["annotations"]) + j,
+                        "image_id": image_id,
+                        "category_id": int(label),
+                        "iscrowd": 0,
+                        "area": (box[1] - box[0]) * (box[3] - box[2]),
+                        "bbox": [box[0], box[2], box[1] - box[0], box[3] - box[2]]
+                    }
+                    for j, (label, box) in enumerate(zip(labels, bbox))
+                ]
+                ret[ax]["images"].append(image)
+                ret[ax]["annotations"].extend(annos)
+
+    with open(root / "annotations.json", "w") as fp:
+        ret = dict(ret)
+        ret["config"] = config
+        print(f"writing annotations to {root / 'annotations.json'}")
+        json.dump(dict(ret), fp)
+        print("done")
+    return ret
+
 
 def main():
     root = Path("/scratch/visual/ashestak/oai/v00/numpy/full")
-    # move the files: 
-
-    train_path = root/"train"
-    test_path = root/"test"
-
-    for each in (train_path, test_path):
-        print(f"PATH: {each}")
-        annotation_dict = {
-            "info": {
-                "author": "Alexey Shestakov",
-                "year": 2020,
-                "description": ("""
-                Detection Anotation File 
-                Sagittal 3D Dess MRI Dataset
-                Boxes are in form [z1, z2, x1, x2, y1, y2]
-                """)
-            },
-            "images": [], 
-            "annotations": [],
-        }
-        for path in tqdm(list(each.iterdir())):
-            item = np.load(path)
-            image = item.get("image")
-            d, w, h = image.shape
-            annotation_dict["images"].append({
-                "id": int(path.stem),
-                "width": w,
-                "height": h,
-                "depth": d,
-                "side": item.get("side")
-            })
-
-            for box, label in zip(item["boxes"], item["labels"]):
-                z1, z2, x1, x2, y1, y2 = box
-                annotation_dict["annotations"].append({
-                    "id": len(annotation_dict["annotations"]),
-                    "image_id": int(path.stem),
-                    "category_id": label,
-                    "bbox": [z1, x1, y1, z2 - z1, x2 - x1, y2 - y1]
-                })
-
-        with open(each/"annotation3d.json", "w") as fp:
-            json.dump(annotation_dict, fp)
-        
+    
+    train_annotations = create_annotations(root/"train")
+    test_annotations = create_annotations(root/"test")
 
 if __name__ == "__main__":
     main()
