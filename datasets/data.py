@@ -1,3 +1,4 @@
+from __future__ import annotations
 from collections import defaultdict
 from argparse import Namespace
 import json
@@ -30,7 +31,6 @@ class DataModuleBase(pl.LightningDataModule):
 
     def __init__(self, hparams, dataset) -> None:
         self.hparams = hparams
-        self.dataset = dataset
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
@@ -49,36 +49,16 @@ class DataModuleBase(pl.LightningDataModule):
             self.test_dataset, batch_size=self.hparams.batch_size,
             shuffle=False, collate_fn=collate_fn 
         )
-
-    def setup(self, stage: Optional[str]=None):
-        root = Path(self.hparams.datadir)
-
-        if stage == "fit" or stage is None:
-            self.train_dataset = self.dataset(list((root/"train").iterdir()))
-            self.val_dataset = self.dataset(list((root/"val").iterdir()))
-
-        if stage == "test" or stage is None:
-            self.test_dataset = self.dataset(list((root/"test").iterdir()))
     
 TransformType: TypeAlias = Callable[[Tuple[torch.Tensor, Dict]], Tuple[torch.Tensor, Dict]]
 
-def default_annotation():
-    return {
-        "info": {},
-        "images": [],
-        "annotations": []
-        }
 
 class MRIDataset(NPZDatasetBase):
 
     def __init__(self, *args, transform:Optional[TransformType]=None,  **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.transform = transform
-        self._coco = {
-            "sag": COCO(),
-            "cor": COCO(),
-            "axi": COCO()
-        }
+        self._coco = defaultdict(lambda:COCO())
         
     
     def __getitem__(self, idx):
@@ -109,21 +89,82 @@ class MRIDataset(NPZDatasetBase):
 
 
 class MRIDataModule(DataModuleBase):
-    def __init__(self, hparams) -> None: 
-        dataset = MRIDataset
-        super().__init__(hparams, dataset)
 
     def setup(self, stage: Optional[str]):
         super().setup(stage)
         root = Path(self.hparams.datadir)
 
-        for each in ["train", "val", "test"]:
-            annotations = json.load(root / each / "annotation3d.json")
-            loader = getattr(self, f"{each}_dataloader")()
-            for key, cocoset in loader.dataset.coco.items():
-                cocoset.dataset = annotations[key]
-                cocoset.createIndex()
+        is_valid = lambda p: p.suffix == ".npz"
 
+        print("Getting items")
+        test_items = [item for item in (root/"test").iterdir() if is_valid(item)]
+        train_items = [item for item in (root/"train").iterdir() if is_valid(item)]
+        val_items = train_items[-300:]
+        train_items = train_items[:-300]
+
+        self.test_dataset = MRIDataset(test_items)
+        self.train_dataset = MRIDataset(train_items)
+        self.val_dataset = MRIDataset(val_items)
+
+        print("Creating Annotations")
+
+        train_annotations = json.load(root/"train"/"annotations.json")
+        config = train_annotations.pop("config", None)
+        test_annotations = json.load(root/"test"/"annotations.json")
+        config = test_annotations.pop("config", None) or config
+
+
+        for key, val in test_annotations.items():
+            print(f"Adding {key} annotations to test_annotations")
+            coco = self.test_dataset.coco[key]
+            coco.dataset = val 
+            coco.createIndex()
+
+
+        val_image_ids = [int(each.stem) for each in val_items]
+
+        val_annotations = defaultdict(lambda: {
+            "categories": train_annotations["sag"]["categories"],
+            "images": [],
+            "annotations": []
+        })
+
+        for key, train in train_annotations.items():
+            print(f"Adding {key} annotations to train_annotations")
+            for image in train["images"]:
+                if image["id"] in val_image_ids:
+                    val_annotations[key]["images"].append(image)
+                    train["images"].remove(image)
+
+            for annotation in train["annotations"]:
+                if annotation["image_id"] in val_image_ids:
+                    val_annotations[key]["annotations"].append(annotation)
+                    train["anntotations"].remove(annotation)
+            
+            
+            coco = self.train_dataset.coco[key]
+            coco.dataset = train_annotations
+            coco.createIndex()
+
+        for key, val in val_annotations.items():
+            print(f"Adding {key} annotations to val_annotations")
+            coco = self.val_dataset.coco[key]
+            coco.dataset = val
+            coco.createIndex()
+
+        print("COCO setup complete!")
+
+        assert len(self.train_dataset), "train_dataset cannot be empty!"
+        assert len(self.val_dataset), "val_dataset cannot be empty!"
+        
+        
+        print(f"Training Items: {len(self.train_dataset)}")
+        print(f"Validation Items: {len(self.val_dataset)}")
+        print(f"Testing Items: {len(self.test_dataset)}")
+
+        print("Data setup complete!")
+        
+        
 def main():
     args = Namespace(
         datadir="/scratch/visual/ashestak/oai/v00/numpy/full",

@@ -2,6 +2,7 @@ from copy import copy
 import io
 import json
 import os
+from util.box_ops import box_cxcywh_to_xyxy
 
 import torch
 from datasets.coco_eval import CocoEvaluator
@@ -65,44 +66,54 @@ class MeDeClMetricsAndLogging(ModelMetricsAndLoggingBase):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.coco_evaluator = {}
+        self.coco_evaluator = {
+            "train": {},
+            "val": {},
+            "test": {}
+        }
         self.postprocessors =  {'bbox': PostProcess()}
 
     def setup(self, trainer, pl_module, stage):
         if stage == "fit" or stage is None:
-            coco_dict = pl_module.val_dataloader().dataset.coco
-            for key, coco_gt in coco_dict.items():
-                self.coco_evaluator[key] = CocoEvaluator(coco_gt)
+            coco = pl_module.val_dataloader().dataset.coco
+            for key, coco_gt in coco.items():
+                self.coco_evaluator["val"][key] = CocoEvaluator(coco_gt)
+
+            coco = pl_module.train_dataloader().dataset.coco
+            for key, coco_gt in coco.items():
+                self.coco_evaluator["train"][key] = CocoEvaluator(coco_gt)
+
+
 
         if stage == "test" or stage is None:
             coco_dict = pl_module.test_dataloader().dataset.coco_dict
             for key, coco_gt in coco_dict.items():
-                self.coco_evaluator[key] = CocoEvaluator(coco_gt)
+                self.coco_evaluator["test"][key] = CocoEvaluator(coco_gt)
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, *args, **kwargs):
         inputs, targets = batch
         
+        # box = [z1, x1, y1, z2, x2, y2]
         planes = (
-            ("sag", [1, 2, 4, 5]),
-            ("cor", [0, 1, 3, 4]), 
-            ("axi", [0, 2, 3, 5])
+            ("sag", [1, 2], [1, 2, 4, 5]),
+            ("cor", [0, 1], [0, 1, 3, 4]), 
+            ("axi", [0, 2], [0, 2, 3, 5])
         )
         
-        for plane, dims in planes:
-            orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
+        for plane, ax, dims in planes:
+            orig_target_sizes = torch.stack([t["orig_size"][ax] for t in targets], dim=0)
             _outputs = copy.deepcopy(outputs)
             # take the relevant components of bounding boxes
             _outputs["boxes"] = _outputs["boxes"][:, dims]
             results = self.postprocessors['bbox'](_outputs, orig_target_sizes)
             res = {target['image_id'].item(): output for target, output in zip(targets, results)}
-            self.coco_evaluator[plane].update(res)
+            self.coco_evaluator["val"][plane].update(res)
 
     def on_validation_epoch_end(self, trainer, pl_module):
-        for key, coco_eval in self.coco_evaluator.items():
-            coco_eval.accumulate()
-            coco_eval.summarize()
-
+        for key, coco_eval in self.coco_evaluator["val"].items():
             if (trainer.current_epoch % 50) == 0:
+                coco_eval.accumulate()
+                coco_eval.summarize()
                 savepath = os.path.join(trainer.logger.dirpath, "coco_eval")
                 torch.save(coco_eval, os.join(savepath, f"coco_{key}_{trainer.current_epoch}.eval"))
             
