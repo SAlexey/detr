@@ -100,6 +100,7 @@ class MRIDataset(NPZDatasetBase):
 
         if self.transform is not None:
             image, target = self.transform((image, target))
+
         return image, target
 
     @property
@@ -117,7 +118,7 @@ class MRIDataModule(DataModuleBase):
         root = Path(self.hparams.datadir)
 
         for each in ["train", "val", "test"]:
-            annotations = json.load(root / each /"annotation_by_plane.json")
+            annotations = json.load(root / each / "annotation3d.json")
             loader = getattr(self, f"{each}_dataloader")()
             for key, cocoset in loader.dataset.coco.items():
                 cocoset.dataset = annotations[key]
