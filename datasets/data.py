@@ -4,10 +4,13 @@ from argparse import Namespace
 import json
 from pathlib import Path
 from typing import Callable, Dict, Optional, OrderedDict, Tuple
+
+from matplotlib.pyplot import box
+from torch.nn.modules import sparse
 from pycocotools.coco import COCO
 
 from typing_extensions import TypeAlias
-from util.box_ops import box_xyxy_to_cxcywh, box_xyxy_to_cxcywh3d
+from util.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, box_xyxy_to_cxcywh3d
 import numpy as np
 import pytorch_lightning as pl
 import torch
@@ -86,6 +89,64 @@ class MRIDataset(NPZDatasetBase):
     @property
     def coco(self):
         return self._coco
+
+
+class MRISliceDataset(MRIDataset):
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.image_ids = set()
+        self.images = []
+        self.annotations = []
+        self.categories = [{}]
+
+    def __getitem__(self, idx: int):
+        image, target = super().__getitem__(idx)
+        target["orig_size"] = target["orig_size"][1:]
+        
+        # take the first meniscus label
+        target["labels"] = target["labels"][0]
+        
+        # take the fist meniscus bounding box
+        tgt_box = target["boxes"][0]
+        
+        # just take the x-y plane of the box
+        target["boxes"] = tgt_box[[1, 2, 4, 5]]
+
+        # mid-section of the box
+        box_center = int(np.round(tgt_box[0] * 160))
+
+        # add some variance
+        slice_index = np.random.randint(box_center - 3, box_center + 3)
+
+
+        # build coco dataset for evaluation
+        if target["image_id"] not in self.image_ids:
+            # add image to annotations if it is not there already
+            self.image_ids.add(target["image_id"])
+            self.images.append({
+                "id": target["image_id"],
+                "width": 300,
+                "height": 300,
+            })
+           
+            # rescale box back to image size
+            # convert to [x1, y1, x2, y2]
+            box = box_cxcywh_to_xyxy(tgt_box) * np.array((300,)*4)
+
+            self.annotations.append({
+                "id": len(self.annotations),
+                "image_id": target["image_id"],
+                "category_id": target["labels"][0],
+                "iscrowd": 0,
+                "area": (box[2] - box[0]) * (box[3] - box[1]),
+                "bbox": [box[0], box[1], box[2] - box[0], box[3] - box[1]] # box = [x, y, width, height]
+            })
+
+            if target["labels"][0] not in [cat.get("id") for cat in self.categories]:
+                self.categories.append({"id": target["labels"][0], "name": "meniscus"})
+
+        return image[slice_index], target
 
 
 class MRIDataModule(DataModuleBase):

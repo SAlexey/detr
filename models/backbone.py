@@ -93,6 +93,26 @@ class Backbone(BackboneBase):
         super().__init__(backbone, train_backbone, num_channels, return_interm_layers)
 
 
+class MRIBackbone(BackboneBase):
+
+    def __init__(self, name: str,
+                 train_backbone: bool,
+                 return_interm_layers: bool,
+                 dilation: bool):
+        backbone = getattr(torchvision.models, name)(
+            replace_stride_with_dilation=[False, False, dilation],
+            pretrained=True, norm_layer=None) 
+        num_channels = 512 if name in ('resnet18', 'resnet34') else 2048
+        
+        # change number of input chanels to 1 for resnet
+        if "resnet" in name:
+            conv1_weight = backbone.conv1.weight.data.mean(dim=0)
+            backbone.conv1 = nn.Conv2d(1, backbone.conv1.out_chanels, kernel_size=7, stride=2, padding=3,
+                                bias=False)
+            backbone.conv1.weight.data = conv1_weight
+        super().__init__(backbone, train_backbone, num_channels, return_interm_layers)
+
+
 class Joiner(nn.Sequential):
     def __init__(self, backbone, position_embedding):
         super().__init__(backbone, position_embedding)
@@ -130,7 +150,7 @@ def build_backbone(args):
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks
-    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+    backbone = MRIBackbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
     model = Joiner(backbone, position_embedding)
     model.num_channels = backbone.num_channels
     return model
