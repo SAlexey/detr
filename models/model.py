@@ -19,10 +19,9 @@ class ModelBase(pl.LightningModule):
         super().__init__()
         self.model = model
         self.criterion = criterion
-        weight_dict = getattr(self.criterion, "weight_dict")
+        weight_dict = getattr(self.criterion, "weight_dict", {})
         
-        assert isinstance(weight_dict, dict)
-        assert weight_dict != {}
+        assert weight_dict
         
         self.save_hyperparameters(hparams)
 
@@ -44,11 +43,19 @@ class ModelBase(pl.LightningModule):
         return {"output": output, "loss_dict": loss_dict, "loss": loss}
 
     def training_step(self, batch, *args, **kwargs):
-        return self.common_step(batch)    
+        out = self.common_step(batch)    
+        self.log("training_loss", out["loss"])
+        self.log_dict({
+            f"training_{k}": v for k, v in out["loss_dict"].items()
+        }, on_step=True, on_epoch=True)
+        return out
 
     def validation_step(self, batch, *args, **kwargs):
         out = self.common_step(batch)
         self.log("validation_loss", out["loss"])
+        self.log_dict({
+            f"training_{k}": v for k, v in out["loss_dict"].items()
+        })
         return out 
 
     def test_step(self, batch, *args, **kwargs):
