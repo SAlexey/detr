@@ -110,7 +110,10 @@ class COCOEvaluationCallback(pl.Callback):
                 torch.tensor(tuple(t["orig_size"]), dtype=torch.int16) 
                 for t in batch[1]
             ])
-            self.coco_evaluator.update(self.postprocess(outputs["output"],  orig_target_sizes))
+            targets = [{k: v for k, v in t.items()} for t in batch[1]]
+            results = self.postprocess(outputs["output"], orig_target_sizes)
+            res = {target['image_id']: output for target, output in zip(targets, results)}
+            self.coco_evaluator.update(res)
 
 
 class BestAndWorstCaseCallback(pl.Callback):
