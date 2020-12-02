@@ -45,11 +45,6 @@ class ModelMetricsAndLoggingBase(pl.callbacks.Callback):
             on_epoch: (bool, default=True) log reduced value on each epoch
             prefix: (string) a prefix prepended to each logged value e.g [training_, validation_, test_]
         """
-        pl_module.log(f"{prefix}_loss", outputs["loss"], on_step=on_step, on_epoch=on_epoch)
-        pl_module.log_dict({
-            f"{prefix}_{k}": v for k, v in outputs["loss_dict"].items()
-        }, on_step=on_step, on_epoch=on_epoch)
-
         for i, metric in enumerate(getattr(self, f"{prefix}_metrics", [])):
             metric_name = getattr(metric, "name", f"metric_{i}")
             metric(outputs["output"], batch)

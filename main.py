@@ -8,7 +8,7 @@ import pytorch_lightning as pl
 import torch
 
 from models.model import MeDeCl
-from util.callbacks import BestAndWorstCaseCallback, COCOEvaluationCallback, MeDeClMetricsAndLogging
+from util.callbacks import BestAndWorstCaseCallback, COCOEvaluationCallback, MeDeClMetricsAndLogging, ModelMetricsAndLoggingBase
 
 
 def get_argparse_args():
@@ -45,14 +45,14 @@ def main():
             monitor="validation_loss",
         )
 
-    # metrics_callback = MeDeClMetricsAndLogging()
+    metrics_callback = ModelMetricsAndLoggingBase()
     coco_eval_callback = COCOEvaluationCallback(1)
     best_and_worst_callback = BestAndWorstCaseCallback(1)
 
     trainer = pl.Trainer.from_argparse_args(
             args,
             logger=logger,
-            callbacks=[checkpoint_callback, best_and_worst_callback, coco_eval_callback]
+            callbacks=[checkpoint_callback, best_and_worst_callback, metrics_callback]
         )
 
     trainer.fit(model, datamodule=data)
