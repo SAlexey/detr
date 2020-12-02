@@ -16,6 +16,7 @@ from models.backbone import Backbone, Joiner, BackboneBase
 from util import box_ops
 from util.misc import NestedTensor, nested_tensor_from_tensor_list
 from hubconf import detr_resnet50, detr_resnet50_panoptic
+from util.box_ops import BboxFormatter
 
 # onnxruntime requires python 3.5 or above
 try:
@@ -213,7 +214,7 @@ class ONNXExporterTester(unittest.TestCase):
             tolerate_small_mismatch=True,
         )
 
-
+@unittest.skip("just because")
 class DataModuleTester(unittest.TestCase):
 
     def setUp(self) -> None:
@@ -252,9 +253,6 @@ class DataModuleTester(unittest.TestCase):
         for key in ["sag", "cor", "axi"]:
             self.assertIn(key, self.train_coco_dict)
 
-        
-        
-
     def test_train_dataloader(self):
         self.__common_dataloader_check(self.datamodule.train_dataloader())
 
@@ -263,6 +261,78 @@ class DataModuleTester(unittest.TestCase):
 
     def test_test_dataloader(self):
         self.__common_dataloader_check(self.datamodule.test_dataloader())
+
+
+class BboxFormatterTester(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.formatter = BboxFormatter()
+        self.box_2d = torch.Tensor((0, 1)*2)
+        self.box_3d = torch.Tensor((0, 1)*3)
+        self.invalid_box = torch.Tensor((0, 1) * 4)
+
+    def test_xxyy_to_xyxy(self):
+        self.assertListEqual(
+            [0, 0, 0, 1, 1, 1],
+            list(self.formatter.convert(self.box_3d, "xxyy", "xyxy"))
+        )
+
+        self.assertListEqual(
+            [0, 0, 1, 1],
+            list(self.formatter.convert(self.box_2d, "xxyy", "xyxy"))
+        )
+
+    def test_xxyy_to_xywh(self):
+        self.assertListEqual(
+            [0, 0, 0, 1, 1, 1],
+            list(self.formatter.convert(self.box_3d, "xxyy", "xywh"))
+        )
+
+        self.assertListEqual(
+            [0, 0, 1, 1],
+            list(self.formatter.convert(self.box_2d, "xxyy", "xywh"))
+        )
+
+    def test_xxyy_to_ccwh(self):
+        self.assertListEqual(
+            [0.5, 0.5, 0.5, 1, 1, 1],
+            list(self.formatter.convert(self.box_3d, "xxyy", "ccwh"))
+        )
+
+        self.assertListEqual(
+            [0.5, 0.5, 1, 1],
+            list(self.formatter.convert(self.box_2d, "xxyy", "ccwh"))
+        )
+
+    def test_ccwh_to_xyxy(self):
+
+        ccwh_2d = self.formatter.convert(self.box_2d, "xxyy", "ccwh")
+        ccwh_3d = self.formatter.convert(self.box_3d, "xxyy", "ccwh")
+
+        self.assertListEqual(
+            [0, 0, 0, 1, 1, 1],
+            list(self.formatter.convert(ccwh_3d, "ccwh", "xyxy"))
+        )
+
+        self.assertListEqual(
+            [0, 0, 1, 1],
+            list(self.formatter.convert(ccwh_2d, "ccwh", "xyxy"))
+        )
+
+    def test_xywh_to_xyxy(self):
+
+        xywh_2d = self.formatter.convert(self.box_2d, "xxyy", "xywh")
+        xywh_3d = self.formatter.convert(self.box_3d, "xxyy", "xywh")
+
+        self.assertListEqual(
+            [0, 0, 0, 1, 1, 1],
+            list(self.formatter.convert(xywh_3d, "xywh", "xyxy"))
+        )
+
+        self.assertListEqual(
+            [0, 0, 1, 1],
+            list(self.formatter.convert(xywh_2d, "xywh", "xyxy"))
+        )
 
 
 if __name__ == '__main__':
