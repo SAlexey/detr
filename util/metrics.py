@@ -1,4 +1,6 @@
 from typing import Dict, Tuple
+
+from pycocotools.cocoeval import COCOeval
 from datasets.coco_eval import CocoEvaluator
 import pytorch_lightning as pl
 import torch
@@ -24,3 +26,5 @@ class MeanAveragePrecision(pl.metrics.Metric):
 
         tgt_classes = torch.cat([t["labels"] for t in targets])
         tgt_boxes = torch.cat([t["boxes"] for t in targets])
+
+

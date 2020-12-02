@@ -1,12 +1,16 @@
 from copy import copy
+from datasets.coco import COCOWrapper
 import io
 import json
 import os
+
+from pycocotools.cocoeval import COCOeval
 from util.box_ops import box_cxcywh_to_xyxy
+from torchvision import ops
 
 import torch
 from datasets.coco_eval import CocoEvaluator
-from typing import List
+from typing import Callable, List
 import pytorch_lightning as pl
 from models.detr import PostProcess
 from pycocotools.coco import COCO
@@ -60,6 +64,79 @@ class ModelMetricsAndLoggingBase(pl.callbacks.Callback):
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, *args, **kwargs):
         self.common_log(pl_module, outputs, batch, prefix="test")
+
+
+class COCOEvaluationCallback(pl.Callback):
+
+    # this is a Hacker McHackface method to compute detector evaluation metrics
+    def __init__(self, compute_frequency=10) -> None:
+        self.frequency = compute_frequency
+        self.postprocess = PostProcess()
+        self.coco_evaluator:COCOeval = None
+        self.coco_gt = None
+
+    def on_validation_epoch_start(self, trainer, pl_module):
+        if not trainer.current_epoch: return 
+            
+        if trainer.current_epoch == 1:
+            # create coco_gt dataset
+            coco_gt = COCO()
+            dataset = pl_module.val_dataloader().dataset
+            coco_gt.datatset = {
+                "images": dataset.images, 
+                "annotations": dataset.annotations, 
+                "categories": dataset.categories
+            }
+            coco_gt.createIndex()
+            self.coco_gt = coco_gt
+            
+        # reset coco evaluator 
+        if trainer.current_epoch % self.frequency == 0:
+            self.coco_evaluator = CocoEvaluator(self.coco_gt, ["bbox"])
+            
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if self.coco_evaluator is not None and (trainer.current_epoch % self.frequency == 0):
+            # run evaluation
+            self.coco_evaluator.accumulate()
+            self.coco_evaluator.summarize()
+            torch.save(
+                self.coco_evaluator, 
+                f"coco_evaluator_verion_{trainer.logger.verion}_epoch_{trainer.current_epoch:03d}.pth"
+            )
+
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        if self.coco_evaluator is not None and (trainer.current_epoch % self.frequency == 0):
+            self.coco_evaluator.update(self.postprocess(outputs))
+
+
+class ShowBestAndWorstCaseCallback(pl.Callback):
+
+    def __init__(self, compute_frequency=10) -> None:
+        self.frequency = compute_frequency
+
+
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        if trainer.current_epoch % self.frequency == 0:
+            image, targets = batch
+            # image = tensor [batch_size, 1, 300, 300] in 2d and [batch_size, 160, 300, 300] in 3d
+            # targets = tuple[dict{boxes, labels}, x batch_size]
+
+            tgt_boxes = torch.stack([t["boxes"] for t in targets])
+            tgt_labels = torch.stack([t["labels"] for t in targets])
+
+            out_boxes = outputs["pred_boxes"]
+            out_labels = outputs["pred_logits"].sigmoid(-1)[..., :-1]
+
+            # convert both box sets to [x1, y1, x2, y2] format
+            tgt_boxes = box_cxcywh_to_xyxy(tgt_boxes) * torch.FloatTensor((300,)*4)
+            out_boxes = box_cxcywh_to_xyxy(out_boxes) * torch.FloatTensor((300,)*4)
+
+
+
+
+
+            
 
 
 class MeDeClMetricsAndLogging(ModelMetricsAndLoggingBase):
