@@ -149,6 +149,24 @@ class MRISliceDataset(MRIDataset):
         return image[slice_index], target
 
 
+class MRISliceDataModule(DataModuleBase):
+
+    def setup(self, stage=None):
+        super().setup(stage)
+        root = Path(self.hparams.datadir)
+
+        is_valid = lambda p: p.suffix == ".npz"
+
+        train_items = [item for item in (root/"train").iterdir() if is_valid(item)]
+        val_items = [item for item in (root/"test").iterdir() if is_valid(item)]
+        
+        self.train_dataset = MRISliceDataset(train_items)
+        self.val_dataset = MRISliceDataset(val_items)
+
+
+
+
+
 class MRIDataModule(DataModuleBase):
 
     def setup(self, stage: Optional[str]):

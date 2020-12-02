@@ -11,7 +11,6 @@ from models.backbone import build_backbone
 from typing import Any, List, Optional
 import pytorch_lightning as pl
 from torch import add
-from torch.nn.modules.module import T_co 
 
 
 class ModelBase(pl.LightningModule):
@@ -27,7 +26,7 @@ class ModelBase(pl.LightningModule):
         
         self.save_hyperparameters(hparams)
 
-    def forward(self, *input: Any, **kwargs: Any) -> T_co:
+    def forward(self, *input: Any, **kwargs: Any):
         return self.model(*input)
 
     def configure_optimizers(self):

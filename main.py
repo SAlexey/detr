@@ -1,4 +1,4 @@
-from datasets.data import MRIDataModule
+from datasets.data import MRIDataModule, MRISliceDataModule
 import os
 import time
 from argparse import ArgumentParser
@@ -25,7 +25,7 @@ def main():
     args = get_argparse_args()
     
     model = MeDeCl(args)
-    data = MRIDataModule(args)
+    data = MRISliceDataModule(args)
     logger = pl.loggers.TensorBoardLogger(name=args.experiment_name)
 
     checkpoint_dirpath = os.path.join(args.weights_save_path, logger.name)

@@ -1,12 +1,11 @@
 from copy import copy
 from datasets.coco import COCOWrapper
-import io
-import json
+import matplotlib.pyplot as plt
 import os
 
 from pycocotools.cocoeval import COCOeval
 from util.box_ops import box_cxcywh_to_xyxy
-from torchvision import ops
+from torchvision.ops import box_iou
 
 import torch
 from datasets.coco_eval import CocoEvaluator
@@ -110,7 +109,7 @@ class COCOEvaluationCallback(pl.Callback):
             self.coco_evaluator.update(self.postprocess(outputs))
 
 
-class ShowBestAndWorstCaseCallback(pl.Callback):
+class BestAndWorstCaseCallback(pl.Callback):
 
     def __init__(self, compute_frequency=10) -> None:
         self.frequency = compute_frequency
@@ -118,7 +117,7 @@ class ShowBestAndWorstCaseCallback(pl.Callback):
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
         if trainer.current_epoch % self.frequency == 0:
-            image, targets = batch
+            images, targets = batch
             # image = tensor [batch_size, 1, 300, 300] in 2d and [batch_size, 160, 300, 300] in 3d
             # targets = tuple[dict{boxes, labels}, x batch_size]
 
@@ -131,6 +130,29 @@ class ShowBestAndWorstCaseCallback(pl.Callback):
             # convert both box sets to [x1, y1, x2, y2] format
             tgt_boxes = box_cxcywh_to_xyxy(tgt_boxes) * torch.FloatTensor((300,)*4)
             out_boxes = box_cxcywh_to_xyxy(out_boxes) * torch.FloatTensor((300,)*4)
+
+            ious = torch.diag(box_iou(out_boxes, tgt_boxes))
+
+            fig, axes = plt.subplots(ncols=2)
+
+            for ax, f, title in zip(axes, (torch.max, torch.min), ("best", "worst")):
+
+                case = f(ious, -1)
+                img = images[case.index]
+                obox = out_boxes[case.index]
+                tbox = tgt_boxes[case.index]
+
+                ax.imshow(img, "gray")
+                ax.add_patch(plt.Rectangle(tbox[0], tbox[1], tbox[2] - tbox[0], tbox[3] - tbox[1], fill=False, ec="blue"))
+                ax.add_patch(plt.Rectangle(obox[0], obox[1], obox[2] - obox[0], obox[3] - obox[1], fill=False, ec="green" if case.value > 0.5 else "red"))
+
+                ax.set_title(f"{title} case".title())
+
+            trainer.logger.experiment.add_figure(f"Epoch_{trainer.current_epoch}_BestWorstCases.png", fig)
+
+
+
+
 
 
 
