@@ -10,7 +10,7 @@ from torch.nn.modules import sparse
 from pycocotools.coco import COCO
 
 from typing_extensions import TypeAlias
-from util.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, box_xyxy_to_cxcywh3d
+from util.box_ops import BboxFormatter, box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, box_xyxy_to_cxcywh3d, box_zxyzxy_to_cdcxcydwh, box_zzxxyy_to_zxyzxy
 import numpy as np
 import pytorch_lightning as pl
 import torch
@@ -32,7 +32,8 @@ class NPZDatasetBase(Dataset):
 
 class DataModuleBase(pl.LightningDataModule):
 
-    def __init__(self, hparams, dataset) -> None:
+    def __init__(self, hparams) -> None:
+        super().__init__()
         self.hparams = hparams
 
     def train_dataloader(self) -> DataLoader:
@@ -52,6 +53,7 @@ class DataModuleBase(pl.LightningDataModule):
             self.test_dataset, batch_size=self.hparams.batch_size,
             shuffle=False, collate_fn=collate_fn 
         )
+
     
 TransformType: TypeAlias = Callable[[Tuple[torch.Tensor, Dict]], Tuple[torch.Tensor, Dict]]
 
@@ -62,22 +64,24 @@ class MRIDataset(NPZDatasetBase):
         super().__init__(*args, **kwargs)
         self.transform = transform
         self._coco = defaultdict(lambda:COCO())
+        self.formatter = BboxFormatter()
         
     
     def __getitem__(self, idx):
         item = super().__getitem__(idx)
     
-        image = torch.FloatTensor(item.get("image"))
+        image = torch.tensor(item.get("image"), dtype=torch.float32)
         image_id = int(self.items[idx].stem)
         image_shape = image.shape[-3:]
 
-        boxes = item.get("boxes") / (image_shape + image_shape)
-        boxes = box_xyxy_to_cxcywh3d(torch.FloatTensor(boxes))
+        boxes = torch.tensor(item.get("boxes"), dtype=torch.float32)
+        boxes = self.formatter.convert(boxes, "xxyy", "ccwh")
+        boxes = boxes / torch.tensor((image_shape + image_shape), dtype=torch.float32)
 
         target = {
             "image_id": image_id,
             "orig_size": image_shape,
-            "labels": torch.FloatTensor(item.get("labels")),
+            "labels": torch.LongTensor(item.get("labels")),
             "boxes": boxes
         }
 
@@ -98,7 +102,7 @@ class MRISliceDataset(MRIDataset):
         self.image_ids = set()
         self.images = []
         self.annotations = []
-        self.categories = [{}]
+        self.categories = []
 
     def __getitem__(self, idx: int):
         image, target = super().__getitem__(idx)
@@ -111,8 +115,8 @@ class MRISliceDataset(MRIDataset):
         tgt_box = target["boxes"][0]
         
         # just take the x-y plane of the box
-        target["boxes"] = tgt_box[[1, 2, 4, 5]]
-
+        target["boxes"] = tgt_box[[1, 2, 4, 5]] # box = [x1, y1, width, height] relative
+ 
         # mid-section of the box
         box_center = int(np.round(tgt_box[0] * 160))
 
@@ -132,27 +136,27 @@ class MRISliceDataset(MRIDataset):
            
             # rescale box back to image size
             # convert to [x1, y1, x2, y2]
-            box = box_cxcywh_to_xyxy(tgt_box) * np.array((300,)*4)
+            box = self.formatter.convert(target["boxes"], "ccwh", "xyxy") * np.array((300,)*4)
 
             self.annotations.append({
                 "id": len(self.annotations),
                 "image_id": target["image_id"],
-                "category_id": target["labels"][0],
+                "category_id": target["labels"].item(),
                 "iscrowd": 0,
                 "area": (box[2] - box[0]) * (box[3] - box[1]),
                 "bbox": [box[0], box[1], box[2] - box[0], box[3] - box[1]] # box = [x, y, width, height]
             })
 
-            if target["labels"][0] not in [cat.get("id") for cat in self.categories]:
-                self.categories.append({"id": target["labels"][0], "name": "meniscus"})
-
-        return image[slice_index], target
+            if target["labels"].item() not in [cat.get("id") for cat in self.categories]:
+                self.categories.append({"id": target["labels"].item(), "name": "meniscus"})
+        target["boxes"] = target["boxes"].unsqueeze(0)
+        target["labels"] = target["labels"].unsqueeze(0)
+        return image[slice_index].unsqueeze(0), target
 
 
 class MRISliceDataModule(DataModuleBase):
 
     def setup(self, stage=None):
-        super().setup(stage)
         root = Path(self.hparams.datadir)
 
         is_valid = lambda p: p.suffix == ".npz"
@@ -164,13 +168,9 @@ class MRISliceDataModule(DataModuleBase):
         self.val_dataset = MRISliceDataset(val_items)
 
 
-
-
-
 class MRIDataModule(DataModuleBase):
 
-    def setup(self, stage: Optional[str]):
-        super().setup(stage)
+    def setup(self, stage: Optional[str]=None):
         root = Path(self.hparams.datadir)
 
         is_valid = lambda p: p.suffix == ".npz"

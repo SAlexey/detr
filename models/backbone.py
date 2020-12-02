@@ -106,8 +106,8 @@ class MRIBackbone(BackboneBase):
         
         # change number of input chanels to 1 for resnet
         if "resnet" in name:
-            conv1_weight = backbone.conv1.weight.data.mean(dim=0)
-            backbone.conv1 = nn.Conv2d(1, backbone.conv1.out_chanels, kernel_size=7, stride=2, padding=3,
+            conv1_weight = backbone.conv1.weight.data.mean(dim=1, keepdim=True)
+            backbone.conv1 = nn.Conv2d(1, backbone.conv1.out_channels, kernel_size=7, stride=2, padding=3,
                                 bias=False)
             backbone.conv1.weight.data = conv1_weight
         super().__init__(backbone, train_backbone, num_channels, return_interm_layers)

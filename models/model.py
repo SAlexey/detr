@@ -16,7 +16,7 @@ from torch import add
 class ModelBase(pl.LightningModule):
 
     def __init__(self, model, criterion, hparams) -> None:
-        super.__init__()
+        super().__init__()
         self.model = model
         self.criterion = criterion
         weight_dict = getattr(self.criterion, "weight_dict")
@@ -47,7 +47,9 @@ class ModelBase(pl.LightningModule):
         return self.common_step(batch)    
 
     def validation_step(self, batch, *args, **kwargs):
-        return self.common_step(batch)
+        out = self.common_step(batch)
+        self.log("validation_loss", out["loss"])
+        return out 
 
     def test_step(self, batch, *args, **kwargs):
         return self.common_step(batch)
@@ -103,11 +105,13 @@ class MeDeCl(ModelBase):
 
     @staticmethod
     def add_argparse_args(parents: List[ArgumentParser]=[]):
-        parser = super().add_argparse_args(parents)
+        parser = ModelBase.add_argparse_args(parents)
+
         # * Model Parameters
         parser.add_argument("--num_classes", type=int, default=2)
         parser.add_argument("--num_queries", type=int, default=2)
-        parser.add_argument("--input_dim", default="2d", type=str, options=["2d", "3d"])
+        parser.add_argument("--input_dim", default="2d", type=str, choices=["2d", "3d"])
+        
         # * Backbone
         parser.add_argument('--backbone', default='resnet50', type=str,
                             help="Name of the convolutional backbone to use")
@@ -129,6 +133,10 @@ class MeDeCl(ModelBase):
         parser.add_argument('--nheads', default=8, type=int,
                             help="Number of attention heads inside the transformer's attentions")
         parser.add_argument('--pre_norm', action='store_true')
+        # * Segmentation
+        parser.add_argument('--masks', action='store_true',
+                        help="Train segmentation head if the flag is provided")
+
         # * Loss
         parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false')
         # * Matcher

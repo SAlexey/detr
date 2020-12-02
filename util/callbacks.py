@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import os
 
 from pycocotools.cocoeval import COCOeval
-from util.box_ops import box_cxcywh_to_xyxy
+from util.box_ops import BboxFormatter, box_cxcywh_to_xyxy
 from torchvision.ops import box_iou
 
 import torch
@@ -72,7 +72,7 @@ class COCOEvaluationCallback(pl.Callback):
         self.frequency = compute_frequency
         self.postprocess = PostProcess()
         self.coco_evaluator:COCOeval = None
-        self.coco_gt = None
+        self.coco_gt:COCO = None
 
     def on_validation_epoch_start(self, trainer, pl_module):
         if not trainer.current_epoch: return 
@@ -81,7 +81,7 @@ class COCOEvaluationCallback(pl.Callback):
             # create coco_gt dataset
             coco_gt = COCO()
             dataset = pl_module.val_dataloader().dataset
-            coco_gt.datatset = {
+            coco_gt.dataset = {
                 "images": dataset.images, 
                 "annotations": dataset.annotations, 
                 "categories": dataset.categories
@@ -106,7 +106,11 @@ class COCOEvaluationCallback(pl.Callback):
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
         if self.coco_evaluator is not None and (trainer.current_epoch % self.frequency == 0):
-            self.coco_evaluator.update(self.postprocess(outputs))
+            orig_target_sizes = torch.stack([
+                torch.tensor(tuple(t["orig_size"]), dtype=torch.int16) 
+                for t in batch[1]
+            ])
+            self.coco_evaluator.update(self.postprocess(outputs["output"],  orig_target_sizes))
 
 
 class BestAndWorstCaseCallback(pl.Callback):
@@ -117,6 +121,7 @@ class BestAndWorstCaseCallback(pl.Callback):
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
         if trainer.current_epoch % self.frequency == 0:
+            convert = pl_module.val_dataloader().dataset.formatter.convert
             images, targets = batch
             # image = tensor [batch_size, 1, 300, 300] in 2d and [batch_size, 160, 300, 300] in 3d
             # targets = tuple[dict{boxes, labels}, x batch_size]
@@ -124,41 +129,31 @@ class BestAndWorstCaseCallback(pl.Callback):
             tgt_boxes = torch.stack([t["boxes"] for t in targets])
             tgt_labels = torch.stack([t["labels"] for t in targets])
 
-            out_boxes = outputs["pred_boxes"]
-            out_labels = outputs["pred_logits"].sigmoid(-1)[..., :-1]
+            out_boxes = outputs["output"]["pred_boxes"]
+            out_labels = outputs["output"]["pred_logits"].softmax(-1)[..., :-1]
 
             # convert both box sets to [x1, y1, x2, y2] format
-            tgt_boxes = box_cxcywh_to_xyxy(tgt_boxes) * torch.FloatTensor((300,)*4)
-            out_boxes = box_cxcywh_to_xyxy(out_boxes) * torch.FloatTensor((300,)*4)
+            tgt_boxes = convert(tgt_boxes, "ccwh", "xyxy") * torch.FloatTensor((300,)*4)
+            out_boxes = convert(out_boxes, "ccwh", "xyxy") * torch.FloatTensor((300,)*4)
 
-            ious = torch.diag(box_iou(out_boxes, tgt_boxes))
+            ious = torch.diag(box_iou(out_boxes.squeeze(0), tgt_boxes.squeeze(0)))
 
             fig, axes = plt.subplots(ncols=2)
 
             for ax, f, title in zip(axes, (torch.max, torch.min), ("best", "worst")):
 
                 case = f(ious, -1)
-                img = images[case.index]
-                obox = out_boxes[case.index]
-                tbox = tgt_boxes[case.index]
+                img = images.tensors[case.indices]
+                obox = out_boxes[case.indices].squeeze()
+                tbox = tgt_boxes[case.indices].squeeze()
 
-                ax.imshow(img, "gray")
-                ax.add_patch(plt.Rectangle(tbox[0], tbox[1], tbox[2] - tbox[0], tbox[3] - tbox[1], fill=False, ec="blue"))
-                ax.add_patch(plt.Rectangle(obox[0], obox[1], obox[2] - obox[0], obox[3] - obox[1], fill=False, ec="green" if case.value > 0.5 else "red"))
+                ax.imshow(img.squeeze(), "gray")
+                ax.add_patch(plt.Rectangle((tbox[1], tbox[0]), tbox[3] - tbox[1], tbox[2] - tbox[0],  fill=False, ec="blue"))
+                ax.add_patch(plt.Rectangle((obox[1], obox[0]), obox[3] - obox[1],  obox[2] - obox[0], fill=False, ec="green" if case.values > 0.5 else "red"))
 
                 ax.set_title(f"{title} case".title())
 
-            trainer.logger.experiment.add_figure(f"Epoch_{trainer.current_epoch}_BestWorstCases.png", fig)
-
-
-
-
-
-
-
-
-
-            
+            trainer.logger.experiment.add_figure(f"Epoch_{trainer.current_epoch}_extremes.png", fig)
 
 
 class MeDeClMetricsAndLogging(ModelMetricsAndLoggingBase):
