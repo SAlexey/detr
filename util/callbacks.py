@@ -66,7 +66,7 @@ class COCOEvaluationCallback(pl.Callback):
     def __init__(self, compute_frequency=10) -> None:
         self.frequency = compute_frequency
         self.postprocess = PostProcess()
-        self.coco_evaluator:COCOeval = None
+        self.coco_evaluator:CocoEvaluator = None
         self.coco_gt:COCO = None
 
     def on_validation_epoch_start(self, trainer, pl_module):
@@ -92,11 +92,12 @@ class COCOEvaluationCallback(pl.Callback):
     def on_validation_epoch_end(self, trainer, pl_module):
         if self.coco_evaluator is not None and (trainer.current_epoch % self.frequency == 0):
             # run evaluation
+            self.coco_evaluator.synchronize_between_processes()
             self.coco_evaluator.accumulate()
             self.coco_evaluator.summarize()
             torch.save(
                 self.coco_evaluator, 
-                f"coco_evaluator_verion_{trainer.logger.verion}_epoch_{trainer.current_epoch:03d}.pth"
+                f"coco_evaluator_verion_{trainer.logger.version}_epoch_{trainer.current_epoch:03d}.pth"
             )
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
