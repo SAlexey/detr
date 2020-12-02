@@ -30,7 +30,7 @@ class ModelMetricsAndLoggingBase(pl.callbacks.Callback):
     def common_log(self, pl_module, outputs, batch, on_step=True, on_epoch=True, prefix=""):
         """
         Common Log for all training, validation and test steps
-        Logs total loss as well as separate loss components
+        Logs totalModelMetricsAndLoggingBaseloss as well as separate loss components
         Args:
             pl_module: LightningModule
             outputs: (dict) a dictionary containing following key, value pairs:
@@ -131,8 +131,9 @@ class BestAndWorstCaseCallback(pl.Callback):
             out_labels = outputs["output"]["pred_logits"].softmax(-1)[..., :-1]
 
             # convert both box sets to [x1, y1, x2, y2] format
-            tgt_boxes = convert(tgt_boxes, "ccwh", "xyxy") * torch.FloatTensor((300,)*4)
-            out_boxes = convert(out_boxes, "ccwh", "xyxy") * torch.FloatTensor((300,)*4)
+            tgt_box_xyxy = convert(tgt_boxes, "ccwh", "xyxy").to(pl_module.device)  
+            tgt_boxes = tgt_box_xyxy * torch.tensor((300,)*4, device=pl_module.device, dtype=torch.float32)
+            out_boxes = convert(out_boxes, "ccwh", "xyxy") * torch.tensor((300,)*4, device=pl_module.device, dtype=torch.float32)
 
             ious = torch.diag(box_iou(out_boxes.squeeze(0), tgt_boxes.squeeze(0)))
 
