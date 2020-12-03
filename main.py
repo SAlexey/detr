@@ -46,8 +46,8 @@ def main():
         )
 
     metrics_callback = ModelMetricsAndLoggingBase()
-    coco_eval_callback = COCOEvaluationCallback(1)
-    best_and_worst_callback = BestAndWorstCaseCallback(1)
+    coco_eval_callback = COCOEvaluationCallback(10)
+    best_and_worst_callback = BestAndWorstCaseCallback(15)
     trainer = pl.Trainer.from_argparse_args(
             args,
             logger=logger,
