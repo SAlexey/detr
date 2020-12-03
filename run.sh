@@ -15,13 +15,13 @@ num_workers=5
 num_classes=1
 num_queries=1
 max_epochs=500
-batch_size=16
+batch_size=4
 weights_save_path=checkpoints/
-experiment_name=2DSlice_Detr
+experiment_name=2DSlice_Detr_bs4
 overfit_batches=10
 gpus=1
-limit_train_batches=500
-limit_val_batches=50
+limit_train_batches=100
+limit_val_batches=10
 
 export https_proxy="http://130.73.108.40:8080"
 export http_proxy="http://130.73.108.40:8080"
@@ -34,5 +34,6 @@ exec python main.py --datadir $datadir \
 	--num_queries $num_queries \
 	--max_epochs $max_epochs \
 	--experiment_name $experiment_name \
+	--batch_size $batch_size \
 	--gpus $gpus \
 	--no_aux_loss \
