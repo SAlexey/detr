@@ -126,6 +126,14 @@ class DetectorBase(ModelBase):
         parser.add_argument("--weight_decay", default=1e-4, type=float)
         return parser
 
+
+class LitBackbone(DetectorBase):
+
+    def __init__(self, args):
+        model = build_backbone(args)
+        critertion = 
+
+
 class MeDeCl(DetectorBase):
     def __init__(self, args) -> None:
 
