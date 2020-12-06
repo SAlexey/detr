@@ -15,14 +15,10 @@ from torch import add
 
 class ModelBase(pl.LightningModule):
 
-    def __init__(self, model, criterion, hparams) -> None:
+    def __init__(self, model:torch.nn.Module, criterion:torch.nn.Module, hparams:Namespace) -> None:
         super().__init__()
         self.model = model
         self.criterion = criterion
-        weight_dict = getattr(self.criterion, "weight_dict", {})
-        
-        assert weight_dict
-        
         self.save_hyperparameters(hparams)
 
     def forward(self, *input: Any, **kwargs: Any):
@@ -31,31 +27,20 @@ class ModelBase(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.model.parameters(), self.hparams.lr)
 
-    def reduce_loss(self, loss_dict):
-        weight = getattr(self.criterion, "weight_dict")
-        return sum(loss_dict[k] * weight[k] for k in loss_dict.keys() if k in weight)
-
     def common_step(self, batch):
         inputs, targets = batch
         output = self.forward(inputs)
-        loss_dict = self.criterion(output, targets)
-        loss = self.reduce_loss(loss_dict)
-        return {"output": output, "loss_dict": loss_dict, "loss": loss}
+        loss = self.criterion(output, targets)
+        return {"output": output, "loss": loss}
 
     def training_step(self, batch, *args, **kwargs):
         out = self.common_step(batch)    
-        self.log("training_loss", out["loss"])
-        self.log_dict({
-            f"training_{k}": v for k, v in out["loss_dict"].items()
-        }, on_step=True, on_epoch=True)
+        self.log("training_loss", out["loss"], on_step=True, on_epoch=True)
         return out
 
     def validation_step(self, batch, *args, **kwargs):
         out = self.common_step(batch)
-        self.log("validation_loss", out["loss"])
-        self.log_dict({
-            f"training_{k}": v for k, v in out["loss_dict"].items()
-        })
+        self.log("validation_loss", out["loss"], on_step=True, on_epoch=True)
         return out 
 
     def test_step(self, batch, *args, **kwargs):
@@ -65,55 +50,32 @@ class ModelBase(pl.LightningModule):
     def add_argparse_args(parents:List[ArgumentParser]=[]):
         parser = ArgumentParser(parents=parents, add_help=False)
         parser.add_argument("--batch_size", type=int, default=1)
-        parser.add_argument("--lr", type=float, default=1e-4)
         parser.add_argument("--num_workers", type=int, default=1)
+        parser.add_argument("--lr", type=float, default=1e-4)
         return parser
-        
 
-class MeDeCl(ModelBase):
-    def __init__(self, args) -> None:
 
-        backbone = build_backbone(args)
+class DetectorBase(ModelBase):
 
-        transformer = build_transformer(args)
+    def common_step(self, batch):
+        out = super().common_step(batch)
+        wd = self.criterion.weight_dict
+        ld = out["loss"]
+        return {"output": out["output"], "loss": sum(wd[k] * ld[k] for k in wd), "loss_dict": ld}
+    
+    def training_step(self, *args, **kwargs):
+        out = super().training_step(*args, **kwargs)
+        self.log_dict({f"training_{loss}": value for loss, value in out["loss_dict"].items()}, on_epoch=True, on_step=True)
+        return out
 
-        matcher = build_matcher(args)
-
-        criterion = SetCriterion(
-            args.num_classes, matcher, {
-                "loss_ce": 1,
-                "loss_bbox": args.bbox_loss_coef,
-                "loss_giou": args.giou_loss_coef,
-            }, eos_coef=args.eos_coef,
-            losses = ['labels', 'boxes']
-        )
-
-        input_proj = (torch.nn.Conv2d if args.input_dim == "2d" else torch.nn.Conv3d)(
-            backbone.num_channels, transformer.d_model, kernel_size=1
-        )
-
-        model = DETR(
-            backbone, 
-            input_proj,
-            transformer, 
-            args.num_classes, 
-            args.num_queries, 
-            aux_loss=args.aux_loss
-        )
-
-        super().__init__(model, criterion, args)
-
-    def configure_optimizers(self):
-        return torch.optim.AdamW([
-            {"params": self.model.backbone.parameters(), "lr": self.hparams.lr_backbone},
-            {"params": self.model.transformer.parameters(), "lr": self.hparams.lr_transformer}
-        ], self.hparams.lr, weight_decay=self.hparams.weight_decay)
-
+    def validation_step(self, *args, **kwargs):
+        out = super().validation_step(*args, **kwargs)
+        self.log_dict({f"validation_{loss}": value for loss, value in out["loss_dict"].items()}, on_epoch=True, on_step=True)
+        return out
 
     @staticmethod
-    def add_argparse_args(parents: List[ArgumentParser]=[]):
+    def add_argparse_args(parents:List[ArgumentParser]=[]):
         parser = ModelBase.add_argparse_args(parents)
-
         # * Model Parameters
         parser.add_argument("--num_classes", type=int, default=2)
         parser.add_argument("--num_queries", type=int, default=2)
@@ -163,6 +125,46 @@ class MeDeCl(ModelBase):
         parser.add_argument('--lr_transformer', default=1e-3, type=float)
         parser.add_argument("--weight_decay", default=1e-4, type=float)
         return parser
+
+class MeDeCl(DetectorBase):
+    def __init__(self, args) -> None:
+
+        backbone = build_backbone(args)
+
+        transformer = build_transformer(args)
+
+        matcher = build_matcher(args)
+
+        criterion = SetCriterion(
+            args.num_classes, matcher, {
+                "loss_ce": 1,
+                "loss_bbox": args.bbox_loss_coef,
+                "loss_giou": args.giou_loss_coef,
+            }, eos_coef=args.eos_coef,
+            losses = ['labels', 'boxes']
+        )
+
+        input_proj = (torch.nn.Conv2d if args.input_dim == "2d" else torch.nn.Conv3d)(
+            backbone.num_channels, transformer.d_model, kernel_size=1
+        )
+
+        model = DETR(
+            backbone, 
+            input_proj,
+            transformer, 
+            args.num_classes, 
+            args.num_queries, 
+            aux_loss=args.aux_loss
+        )
+
+        super().__init__(model, criterion, args)
+
+    def configure_optimizers(self):
+        return torch.optim.AdamW([
+            {"params": self.model.backbone.parameters(), "lr": self.hparams.lr_backbone},
+            {"params": self.model.transformer.parameters(), "lr": self.hparams.lr_transformer}
+        ], self.hparams.lr, weight_decay=self.hparams.weight_decay)
+
 
 
 

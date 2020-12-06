@@ -1,4 +1,7 @@
+from collections import defaultdict
 from copy import copy
+from pathlib import Path
+import tempfile
 from datasets.coco import COCOWrapper
 import matplotlib.pyplot as plt
 import os
@@ -6,6 +9,7 @@ import os
 from pycocotools.cocoeval import COCOeval
 from util.box_ops import BboxFormatter, box_cxcywh_to_xyxy
 from torchvision.ops import box_iou
+from tqdm import tqdm
 
 import torch
 from datasets.coco_eval import CocoEvaluator
@@ -14,7 +18,7 @@ import pytorch_lightning as pl
 from models.detr import PostProcess
 from pycocotools.coco import COCO
 
-
+COCO_EVAL_NAMES = ("AP_coco", "AP_pascal", "AP_strict", "AP_small", "AP_medium", "AP_large", "AR_max_1", "AR_max_10", "AR_max_100", "AR_small", "AR_medium", "AR_large")
 class ModelMetricsAndLoggingBase(pl.callbacks.Callback):
 
     def __init__(
@@ -60,56 +64,105 @@ class ModelMetricsAndLoggingBase(pl.callbacks.Callback):
         self.common_log(pl_module, outputs, batch, prefix="test")
 
 
+def coco_gt_from_dataset(loader, device="cpu"):
+    coco_api = COCO()
+            
+    images = []
+    annotations = []
+    categories = []
+    category_ids = set()
+
+    box_convert = loader.dataset.formatter.convert
+    pbar = tqdm(loader, total=len(loader.dataset))
+    for item in pbar:
+        _, targets = item
+        # create coco_gt
+        for target in targets:
+            images.append({
+                "id": target["image_id"],
+                "width": target["orig_size"][0],
+                "height": target["orig_size"][1],
+            })
+            
+            for box, label in zip(target["boxes"], target["labels"]):
+                label = label.item()
+                box = box_convert(box, "ccwh", "xywh").to(device)
+                box = box * torch.tensor(target["orig_size"] * 2, device=device, dtype=torch.float32)
+                annotations.append({
+                    "id": len(annotations),
+                    "image_id": target["image_id"],
+                    "category_id": label,
+                    "iscrowd": 0,
+                    "area": box[2] * box[3],
+                    "bbox": list(box) # box = [x, y, width, height]
+                })
+                if label not in category_ids:
+                    categories.append({"id": label, "name": f"meniscus_{label}"})
+                    category_ids.add(label)
+            pbar.update(1)
+    coco_api.dataset = {
+        "images": images,
+        "categories": categories,
+        "annotations": annotations
+    }
+
+    coco_api.createIndex()
+    return coco_api
+
+
 class COCOEvaluationCallback(pl.Callback):
 
-    # this is a Hacker McHackface method to compute detector evaluation metrics
-    def __init__(self, compute_frequency=10) -> None:
+    def __init__(self, compute_frequency=10):
         self.frequency = compute_frequency
-        self.postprocess = PostProcess()
-        self.coco_evaluator:CocoEvaluator = None
-        self.coco_gt:COCO = None
+
+        self.coco_dts = defaultdict(lambda: {"images": [], "annotations": [], "categories": []})
+        self.coco_gts = defaultdict(COCO)
 
     def on_validation_epoch_start(self, trainer, pl_module):
-        if not trainer.current_epoch: return 
-            
-        if trainer.current_epoch == 1:
-            # create coco_gt dataset
-            coco_gt = COCO()
-            dataset = pl_module.val_dataloader().dataset
-            coco_gt.dataset = {
-                "images": dataset.images, 
-                "annotations": dataset.annotations, 
-                "categories": dataset.categories
-            }
-            coco_gt.createIndex()
-            self.coco_gt = coco_gt
-            
-        # reset coco evaluator 
-        if trainer.current_epoch % self.frequency == 0:
-            self.coco_evaluator = CocoEvaluator(self.coco_gt, ["bbox"])
-            
-
+        if trainer.current_epoch == 1 or ( trainer.current_epoch % self.frequency == 0 ):
+            self.coco_eval = CocoEvaluator(self.coco_gt, ["bbox"])
+    
+    
     def on_validation_epoch_end(self, trainer, pl_module):
-        if self.coco_evaluator is not None and (trainer.current_epoch % self.frequency == 0):
-            # run evaluation
-            self.coco_evaluator.synchronize_between_processes()
-            self.coco_evaluator.accumulate()
-            self.coco_evaluator.summarize()
-            torch.save(
-                self.coco_evaluator, 
-                f"{trainer.logger.}coco_evaluator_verion_{trainer.logger.version}_epoch_{trainer.current_epoch:03d}.pth"
-            )
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        if self.coco_evaluator is not None and (trainer.current_epoch % self.frequency == 0):
-            orig_target_sizes = torch.stack([
-                torch.tensor(tuple(t["orig_size"]), dtype=torch.int16) 
-                for t in batch[1]
-            ])
-            targets = [{k: v for k, v in t.items()} for t in batch[1]]
-            results = self.postprocess(outputs["output"], orig_target_sizes)
-            res = {target['image_id']: output for target, output in zip(targets, results)}
-            self.coco_evaluator.update(res)
+        # create coco_gt
+        if trainer.current_epoch == 1 or ( trainer.current_epoch % self.frequency == 0):
+            for key, coco_eval in self.coco_eval.items():
+                coco_eval.synchronize_between_processes()
+                coco_eval.accumulate()
+                coco_eval.summarize()
+
+                if trainer.logger is not None:
+                    save_dir = os.path.join(str(trainer.logger.save_dir), str(trainer.logger.name), f"version_{trainer.logger.version}")
+                    torch.save(
+                        coco_eval.coco_eval["bbox"], 
+                        os.path.join(save_dir, f"coco_evaluator_{key}_epoch_{trainer.current_epoch:03d}.pth")
+                    )
+                    
+                    trainer.logger.log_metrics({
+                        f"validation_{key}_{name}": value
+                        for name, value in zip(
+                        COCO_EVAL_NAMES,
+                        coco_eval.coco_eval['bbox'].stats.tolist())
+                    }, step=trainer.current_epoch)
+
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):     
+        if self.current_epoch == 0:
+            pass
+
+
+        _, targets = batch
+        out = outputs["output"]
+        if trainer.current_epoch == 1 or (trainer.current_epoch % self.frequency == 0):
+            for _, coco_eval in self.coco_eval.items():
+                orig_target_sizes = torch.stack([
+                    torch.tensor(tuple(t["orig_size"]), dtype=torch.int16) 
+                    for t in targets
+                ])
+                targets = [{k: v for k, v in t.items()} for t in targets]
+                results = self.postprocess(out, orig_target_sizes)
+                res = {target['image_id']: output for target, output in zip(targets, results)}
+                coco_eval.update(res)
 
 
 class BestAndWorstCaseCallback(pl.Callback):
@@ -125,18 +178,17 @@ class BestAndWorstCaseCallback(pl.Callback):
             # image = tensor [batch_size, 1, 300, 300] in 2d and [batch_size, 160, 300, 300] in 3d
             # targets = tuple[dict{boxes, labels}, x batch_size]
 
-            tgt_boxes = torch.stack([t["boxes"] for t in targets])
-            tgt_labels = torch.stack([t["labels"] for t in targets])
+            tgt_boxes = torch.cat([t["boxes"] for t in targets])
+            tgt_labels = torch.cat([t["labels"] for t in targets])
 
-            out_boxes = outputs["output"]["pred_boxes"]
-            out_labels = outputs["output"]["pred_logits"].softmax(-1)[..., :-1]
+            out_boxes = outputs["output"]["pred_boxes"].flatten(0, 1)
+            out_labels = outputs["output"]["pred_logits"].flatten(0, 1).softmax(-1)
 
             # convert both box sets to [x1, y1, x2, y2] format
             tgt_box_xyxy = convert(tgt_boxes, "ccwh", "xyxy").to(pl_module.device)  
             tgt_boxes = tgt_box_xyxy * torch.tensor((300,)*4, device=pl_module.device, dtype=torch.float32)
             out_boxes = convert(out_boxes, "ccwh", "xyxy") * torch.tensor((300,)*4, device=pl_module.device, dtype=torch.float32)
-
-            ious = torch.diag(box_iou(out_boxes.squeeze(0), tgt_boxes.squeeze(0)))
+            ious = torch.diag(box_iou(out_boxes, tgt_boxes))
 
             fig, axes = plt.subplots(ncols=2)
 
