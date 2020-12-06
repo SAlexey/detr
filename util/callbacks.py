@@ -97,7 +97,7 @@ class COCOEvaluationCallback(pl.Callback):
             self.coco_evaluator.summarize()
             torch.save(
                 self.coco_evaluator, 
-                f"coco_evaluator_verion_{trainer.logger.version}_epoch_{trainer.current_epoch:03d}.pth"
+                f"{trainer.logger.}coco_evaluator_verion_{trainer.logger.version}_epoch_{trainer.current_epoch:03d}.pth"
             )
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
