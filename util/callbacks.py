@@ -1,22 +1,26 @@
+import os
+import tempfile
 from collections import defaultdict
 from copy import copy
 from pathlib import Path
-import tempfile
-from datasets.coco import COCOWrapper
-import matplotlib.pyplot as plt
-import os
+from typing import Callable, List
 
+import numpy as np
+
+import cv2
+import matplotlib.pyplot as plt
+import pytorch_lightning as pl
+import torch
+from datasets.coco import COCOWrapper
+from datasets.coco_eval import CocoEvaluator
+from models.detr import PostProcess
+from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
-from util.box_ops import BboxFormatter, box_cxcywh_to_xyxy
 from torchvision.ops import box_iou
 from tqdm import tqdm
 
-import torch
-from datasets.coco_eval import CocoEvaluator
-from typing import Callable, List
-import pytorch_lightning as pl
-from models.detr import PostProcess
-from pycocotools.coco import COCO
+from util.box_ops import BboxFormatter, box_cxcywh_to_xyxy
+from util.gradcam import GradCam
 
 COCO_EVAL_NAMES = ("AP_coco", "AP_pascal", "AP_strict", "AP_small", "AP_medium", "AP_large", "AR_max_1", "AR_max_10", "AR_max_100", "AR_small", "AR_medium", "AR_large")
 class ModelMetricsAndLoggingBase(pl.callbacks.Callback):
@@ -148,7 +152,7 @@ class COCOEvaluationCallback(pl.Callback):
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):     
         if self.current_epoch == 0:
             pass
-        
+
 
 
         _, targets = batch
@@ -206,6 +210,70 @@ class BestAndWorstCaseCallback(pl.Callback):
                 ax.set_title(f"{title} case".title())
 
             trainer.logger.experiment.add_figure(f"Epoch_{trainer.current_epoch}_extremes.png", fig)
+
+
+class VisualizeLayerCallback(pl.Callback):
+    def __init__(self, frequency=10):
+        self.frequency = frequency
+
+
+def show_cam_on_image(img, mask):
+    heatmap = cv2.applyColorMap(np.uint8(255 * mask), cv2.COLORMAP_JET)
+    heatmap = np.float32(heatmap) / 255
+    cam = heatmap + np.float32(img)
+    cam = cam / np.max(cam)
+    cv2.imwrite("cam.jpg", np.uint8(255 * cam))
+        
+class GradCamCallback(VisualizeLayerCallback):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.grad_cam = None
+        self.cams = {
+            "training": [],
+            "validation": []
+        }
+
+    def on_fit_start(self, trainer, pl_module):
+        self.grad_cam = GradCam(model=pl_module.model, feature_module=pl_module.model.layer4, target_layer_names=["2"])
+
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, *args):
+        if trainer.current_epoch % self.frequency == 0 and (10 <= batch_idx <= 40) and (batch_idx % 2 == 0):
+            self.visualize_grad_cam(trainer, pl_module, outputs, batch, batch_idx)
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, *args):
+        if trainer.current_epoch % self.frequency == 0 and (10 <= batch_idx <= 40) and (batch_idx % 2 == 0):
+            self.visualize_grad_cam(trainer, pl_module, outputs[0][0]["extra"], batch, batch_idx)
+
+    def visualize_grad_cam(self, trainer, pl_module, outputs, batch, batch_idx):      
+        with torch.set_grad_enabled(True):
+            inputs, targets = batch
+            cams = [self.grad_cam(img.unsqueeze(0).to(pl_module.device)) for img in inputs] # get class activations mappings
+            cams = [np.stack(cam) for cam in cams] # make them 3 chanels
+
+            fig, axes = plt.subplots(ncols=2, figsize=(10, 6))
+            predictions = outputs["output"].softmax(-1).squeeze()
+            predictions = predictions.max(-1)
+
+            scores = predictions.values
+
+            best_score = scores.max(-1)
+            worst_score = scores.max(-1)
+
+            scores = [best_score, worst_score]
+
+            labels = [predictions.indices[each.indices] for each in scores]
+            
+            for ax, img, cam, score, label, target  in zip(axes, inputs, cams, scores, labels, targets):
+                heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
+                heatmap = np.float32(heatmap) / 255
+                cam = heatmap + np.moveaxis(img.numpy(), 0, -1)
+                cam = cam / np.max(cam)
+                ax.imshow(cam)
+                ax.set_title(f"Is: {target}; got: {label} ({score.values * 100:.1f}%)")
+                plt.axis('off')
+            prefix = "training" if pl_module.training else "validation"
+            trainer.logger.experiment.add_figure(f"GradCam_{prefix}_epoch_{trainer.current_epoch}_{batch_idx}", fig)
 
 
 class MeDeClMetricsAndLogging(ModelMetricsAndLoggingBase):
