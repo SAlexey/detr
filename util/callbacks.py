@@ -128,6 +128,7 @@ class COCOEvaluationCallback(pl.Callback):
     
     
     def on_validation_epoch_end(self, trainer, pl_module):
+
         # create coco_gt
         if trainer.current_epoch == 1 or ( trainer.current_epoch % self.frequency == 0):
             for key, coco_eval in self.coco_eval.items():
@@ -152,8 +153,6 @@ class COCOEvaluationCallback(pl.Callback):
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):     
         if self.current_epoch == 0:
             pass
-
-
 
         _, targets = batch
         out = outputs["output"]
