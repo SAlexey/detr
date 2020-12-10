@@ -2,12 +2,14 @@ from __future__ import annotations
 from collections import defaultdict
 from argparse import Namespace
 import json
+import os
 from pathlib import Path
-from typing import Callable, Dict, Optional, OrderedDict, Tuple
+from typing import Any, Callable, Dict, Optional, OrderedDict, Tuple
 
 from matplotlib.pyplot import box
 from torch.nn.modules import sparse
 from pycocotools.coco import COCO
+from torchvision.datasets.folder import DatasetFolder
 
 from typing_extensions import TypeAlias
 from util.box_ops import BboxFormatter, box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, box_xyxy_to_cxcywh3d, box_zxyzxy_to_cdcxcydwh, box_zzxxyy_to_zxyzxy
@@ -15,8 +17,66 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader, Dataset
-from util.misc import collate_fn
+from torchvision.datasets import Imacollate_fngeFolder, CocoDetection
+from util.misc import 
+from scipy import ndimage
+from tqdm import tqdm
 
+def is_np_file(path):
+    return path.endswith(".npy") or path.endswith("npz")
+
+
+def load_npz(path:str) -> Dict[str, Any]:
+    with np.load(path) as npzfile:
+        return dict(npzfile)
+
+def load_npy(path:str) -> np.array:
+    with np.load(path) as npyfile:
+        return npyfile
+
+class DetectionDataset(CocoDetection):
+
+    """
+    Copy paste with from torchvision.datasets 
+     - changed image format 
+     - added loader option
+    """
+
+    def __init__(self, loader:Callable[[str], Any], *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.loader = loader 
+
+    def __getitem__(self, index: int) -> Tuple[Any, Any]:
+        """
+
+        copy-paste from torchvisionn.datasets
+
+        Args:
+            index (int): Index
+
+        Returns:
+            tuple: Tuple (image, target). target is the object returned by ``coco.loadAnns``.
+        """
+        coco = self.coco
+        img_id = self.ids[index]
+        ann_ids = coco.getAnnIds(imgIds=img_id)
+        target = coco.loadAnns(ann_ids)
+
+        path = coco.loadImgs(img_id)[0]['file_name']
+
+        img = self.loader(os.path.join(self.root, path))
+
+        if self.transforms is not None:
+            img, target = self.transforms(img, target)
+
+        return img, target
+
+
+class NPYImageFolder(ImageFolder):
+    def __init__(self, *args, **kwargs):
+        loader = kwargs.pop("loader", np.load)
+        is_valid_file = kwargs.pop("is_valid_file", is_np_file)
+        super().__init__(*args, loader=loader, is_valid_file=is_valid_file, **kwargs)
 
 class NPZDatasetBase(Dataset):
 
@@ -27,31 +87,33 @@ class NPZDatasetBase(Dataset):
         return len(self.items)
 
     def __getitem__(self, idx):
-        return np.load(self.items[idx])
+        with np.load(self.items[idx]) as item:
+            return dict(item)
 
 
 class DataModuleBase(pl.LightningDataModule):
 
-    def __init__(self, hparams) -> None:
+    def __init__(self, hparams, collate_fn=None) -> None:
         super().__init__()
         self.hparams = hparams
+        self.collate = collate_fn
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
             self.train_dataset, batch_size=self.hparams.batch_size,
-            shuffle=True, collate_fn=collate_fn
+            shuffle=True, collate_fn=self.collate, num_workers=self.hparams.num_workers
         )
 
     def val_dataloader(self) -> DataLoader:
         return DataLoader(
             self.val_dataset, batch_size=self.hparams.batch_size,
-            shuffle=False, collate_fn=collate_fn 
+            shuffle=False, collate_fn=self.collate, num_workers=self.hparams.num_workers 
         )
 
     def test_dataloader(self) -> DataLoader:
         return DataLoader(
             self.test_dataset, batch_size=self.hparams.batch_size,
-            shuffle=False, collate_fn=collate_fn 
+            shuffle=False, collate_fn=self.collate, num_workers=self.hparams.num_workers
         )
 
     
@@ -154,6 +216,73 @@ class MRISliceDataset(MRIDataset):
         return image[slice_index].unsqueeze(0), target
 
 
+
+class LitBackboneDataSet(NPZDatasetBase):
+
+    def __init__(self, items):
+        self.items = items
+        self.n_features = lambda a: ndimage.label(a)[1]
+
+    def __len__(self):
+        return len(self.items)
+
+
+    def __getitem__(self, idx):
+
+        with np.load(self.items[idx]) as item:
+            image = item["image"]
+            segmentation = item["segmentation"]
+        
+        menisci = np.isin(segmentation, (5,6))
+
+        num_features = [self.n_features(s) for s in menisci]
+        num_features = torch.tensor(num_features, dtype=torch.long).clip(0, 2)
+
+        indices = np.arange(len(num_features))[10:150]
+
+        np.random.shuffle(indices)
+
+        indices = indices[:80]
+
+        if np.random.rand() >= 0.5:
+            noize = np.random.rand(*image.shape)
+            menisci[::2, :, :] = True
+            noize[menisci] = 1
+
+            image = image * noize
+
+        image = torch.tensor(image, dtype=torch.float32)
+
+        return image[indices], num_features[indices]
+
+
+class LitBackboneData(DataModuleBase):
+
+    def setup(self, stage=None):
+        root = Path(self.hparams.datadir)
+        path = root.iterdir()
+
+        items = []
+
+        pbar = tqdm(total=550)
+        while len(items) < 550:
+            p = next(path)
+            try: 
+                with np.load(p) as item:
+                    items.append(p)
+                    pbar.update()
+            except Exception as e:
+                print(e)
+                continue
+
+        train_items = items[:500]
+        val_items = items[500:]
+
+        self.train_dataset = LitBackboneDataSet(train_items)
+        self.val_dataset = LitBackboneDataSet(val_items)    
+
+
+
 class MRISliceDataModule(DataModuleBase):
 
     def setup(self, stage=None):
@@ -246,12 +375,15 @@ class MRIDataModule(DataModuleBase):
         
 def main():
     args = Namespace(
-        datadir="/scratch/visual/ashestak/oai/v00/numpy/full",
+        datadir="/scratch/visual/ashestak/oai/v00/numpy/full/train",
         num_workers=1,
         batch_size=1
     )
-    datamodule = MRIDataModule(args)
+    datamodule = LitBackboneData(args)
     datamodule.setup()
+
+    for item in datamodule.train_dataloader():
+        item
     
 
 

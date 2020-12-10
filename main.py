@@ -8,8 +8,9 @@ from argparse import ArgumentParser
 
 import pytorch_lightning as pl
 import torch
+from util.misc import collate_fn
 
-from models.model import MeDeCl
+from models.model import DetrMRI, MeDeCl
 from util.callbacks import BestAndWorstCaseCallback, COCOEvaluationCallback, ModelMetricsAndLoggingBase
 
 
@@ -19,8 +20,10 @@ def get_argparse_args():
     parser = MeDeCl.add_argparse_args([parser])
 
     parser.add_argument("--experiment_name", default=f"Exp-{time.strftime('%d%m%YT%H:%M')}")
+    parser.add_argument("--backbone_weights_path", type=str)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--datadir", type=str, required=True)
+    parser.add_argument('--dataset_file', default='coco')
     args = parser.parse_args()
 
     return args
@@ -28,8 +31,8 @@ def get_argparse_args():
 def main():
     args = get_argparse_args()
     
-    model = MeDeCl(args)
-    data = MRISliceDataModule(args)
+    model = DetrMRI(args)
+    data = MRISliceDataModule(args, collate_fn=collate_fn)
     logger = pl.loggers.TensorBoardLogger(save_dir="tb_logs", name=args.experiment_name)
 
     checkpoint_root = Path(args.weights_save_path or "checkpoints")

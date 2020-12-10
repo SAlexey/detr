@@ -1,16 +1,18 @@
 from argparse import ArgumentParser, Namespace
+from hubconf import detr_resnet101_dc5
 from pickle import NONE
-
-from numpy.lib.arraysetops import isin
-from models.detr import DETR, SetCriterion, PostProcess
-from models.matcher import build_matcher
-
-import torch
-from models.transformer import build_transformer
-from models.backbone import build_backbone
 from typing import Any, List, Optional
+
 import pytorch_lightning as pl
-from torch import add
+import torch
+from numpy.lib.arraysetops import isin
+from torch import nn
+from torchvision.models.resnet import resnet50
+
+from models.backbone import build_backbone
+from models.detr import DETR, PostProcess, SetCriterion, build
+from models.matcher import build_matcher
+from models.transformer import build_transformer
 
 
 class ModelBase(pl.LightningModule):
@@ -88,6 +90,7 @@ class DetectorBase(ModelBase):
                             help="If true, we replace stride with dilation in the last convolutional block (DC5)")
         parser.add_argument('--position_embedding', default='sine', type=str, choices=('sine', 'learned'),
                             help="Type of positional embedding to use on top of the image features")
+        parser.add_argument("--backbone_checkpoint_path", type=str, required=False)
         # * Transformer
         parser.add_argument('--enc_layers', default=6, type=int,
                             help="Number of encoding layers in the transformer")
@@ -127,17 +130,52 @@ class DetectorBase(ModelBase):
         return parser
 
 
-class LitBackbone(DetectorBase):
+class LitBackbone(ModelBase):
 
     def __init__(self, args):
-        model = build_backbone(args)
-        critertion = 
+        model = resnet50(pretrained=True, replace_stride_with_dilation=[False, False, True])
+        criterion = nn.CrossEntropyLoss()
+        super().__init__(model, criterion, args) 
+        conv1 = model.conv1
+        model.conv1 = nn.Conv2d(1, conv1.out_channels, conv1.kernel_size, conv1.stride, conv1.padding, bias=False)
+        model.conv1.weight.data = conv1.weight.data.mean(dim=1, keepdim=True)
+        model.fc = nn.Linear(2048, 3, bias=True)
+        self.accuracy = pl.metrics.classification.Accuracy()
 
+    def common_step(self, batch):
+        inputs, targets = batch
+        output = self.forward(inputs.permute((1, 0, 2, 3)))
+        loss = self.criterion(output, targets.squeeze())
+        return {"output": output, "loss": loss}
+
+    def training_step(self, batch, *args, **kwargs):
+        out = super().training_step(batch, *args, **kwargs)
+        predictions = out["output"].softmax(-1).max(-1, keepdim=True)
+        self.accuracy(predictions.indices.squeeze(), batch[1].squeeze())
+        self.log("training_accuracy", self.accuracy, on_epoch=True)
+        return out
+
+
+    def validation_step(self, batch, *args, **kwargs):
+        out = super().validation_step(batch, *args, **kwargs)
+        predictions = out["output"].softmax(-1).max(-1, keepdim=True)
+        self.accuracy(predictions.indices.squeeze(), batch[1].squeeze())
+        self.log("validation_accuracy", self.accuracy, on_epoch=True)
+        return out
+
+        
 
 class MeDeCl(DetectorBase):
     def __init__(self, args) -> None:
 
         backbone = build_backbone(args)
+
+
+        if args.backbone_checkpoint_path:
+            checkpoint = torch.load(args.backbone_checkpoint_path)
+            state_dict = checkpoint.get("state_dict")
+            backbone.load_state_dict({k.replace("model.", "0.body."): v for k,v in state_dict.items() if "fc." not in k})
+            print("backbone checkpoint loaded")
 
         transformer = build_transformer(args)
 
@@ -172,6 +210,32 @@ class MeDeCl(DetectorBase):
             {"params": self.model.backbone.parameters(), "lr": self.hparams.lr_backbone},
             {"params": self.model.transformer.parameters(), "lr": self.hparams.lr_transformer}
         ], self.hparams.lr, weight_decay=self.hparams.weight_decay)
+
+
+class DetrMRI(DetectorBase):
+
+    def __init__(self, args):
+        model, postprocessors = detr_resnet101_dc5(pretrained=True, return_postprocessor=True)
+        self.postprocessors = {"bbox": postprocessors}
+        body = model.backbone[0].body
+        conv1_weight = body.conv1.weight.data.mean(dim=1, keepdim=True)
+        body.conv1 = nn.Conv2d(1, body.conv1.out_channels, kernel_size=7, stride=2, padding=3,
+                            bias=False)
+        body.conv1.weight.data = conv1_weight
+        matcher = build_matcher(args)
+
+        criterion = SetCriterion(
+            args.num_classes, matcher, {
+                "loss_ce": 1,
+                "loss_bbox": args.bbox_loss_coef,
+                "loss_giou": args.giou_loss_coef,
+            }, eos_coef=args.eos_coef,
+            losses = ['labels', 'boxes']
+        )
+        super().__init__(model, criterion, args)
+
+
+
 
 
 

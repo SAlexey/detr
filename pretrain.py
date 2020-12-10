@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from torchvision.models.resnet import resnet50
-from datasets.data import MRIDataModule, MRISliceDataModule
+from datasets.data import LitBackboneData, MRIDataModule, MRISliceDataModule
 import os
 import time
 from argparse import ArgumentParser
@@ -9,8 +9,8 @@ from argparse import ArgumentParser
 import pytorch_lightning as pl
 import torch
 
-from models.model import MeDeCl
-from util.callbacks import BestAndWorstCaseCallback, COCOEvaluationCallback, ModelMetricsAndLoggingBase
+from models.model import LitBackbone, MeDeCl
+from util.callbacks import BestAndWorstCaseCallback, COCOEvaluationCallback, GradCamCallback, ModelMetricsAndLoggingBase
 
 
 def get_argparse_args():
@@ -28,8 +28,8 @@ def get_argparse_args():
 def main():
     args = get_argparse_args()
     
-    model = MeDeCl(args)
-    data = MRISliceDataModule(args)
+    model = LitBackbone(args)
+    data = LitBackboneData(args)
     logger = pl.loggers.TensorBoardLogger(save_dir="tb_logs", name=args.experiment_name)
 
     checkpoint_root = Path(args.weights_save_path or "checkpoints")
@@ -55,22 +55,14 @@ def main():
         if checkpoints:
             resume_from_checkpoint = str(checkpoints[-1])
             
-                
 
-    metrics_callback = ModelMetricsAndLoggingBase()
-    coco_eval_callback = COCOEvaluationCallback()
-    best_and_worst_callback = BestAndWorstCaseCallback(5)
-    callbacks = [checkpoint_callback, best_and_worst_callback, metrics_callback]
+
     trainer = pl.Trainer.from_argparse_args(
             args,
             logger=logger,
-            callbacks=callbacks,
-            resume_from_checkpoint=resume_from_checkpoint
+            resume_from_checkpoint=resume_from_checkpoint,
+            callbacks=[checkpoint_callback]
         )
-
-    if resume_from_checkpoint:
-        assert trainer.callbacks == callbacks
-        trainer.callbacks = callbacks
 
     trainer.fit(model, datamodule=data)
 
