@@ -1,7 +1,8 @@
+from datasets.oai import OAIMRI
 from pathlib import Path
 
 from torchvision.models.resnet import resnet50
-from datasets.data import MRIDataModule, MRISliceDataModule
+from datasets.data import MRIDataModule, MRISliceDataModule, OverfitAugData
 import os
 import time
 from argparse import ArgumentParser
@@ -32,7 +33,8 @@ def main():
     args = get_argparse_args()
     
     model = DetrMRI(args)
-    data = MRISliceDataModule(args, collate_fn=collate_fn)
+    data = OAIMRI()
+    data = OverfitAugData(args, collate_fn=collate_fn)
     logger = pl.loggers.TensorBoardLogger(save_dir="tb_logs", name=args.experiment_name)
 
     checkpoint_root = Path(args.weights_save_path or "checkpoints")
@@ -61,8 +63,7 @@ def main():
                 
 
     metrics_callback = ModelMetricsAndLoggingBase()
-    coco_eval_callback = COCOEvaluationCallback()
-    best_and_worst_callback = BestAndWorstCaseCallback(5)
+    best_and_worst_callback = BestAndWorstCaseCallback(1)
     callbacks = [checkpoint_callback, best_and_worst_callback, metrics_callback]
     trainer = pl.Trainer.from_argparse_args(
             args,

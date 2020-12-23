@@ -1,38 +1,39 @@
 from __future__ import annotations
-from collections import defaultdict
-from argparse import Namespace
+
 import json
 import os
+from argparse import Namespace
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, OrderedDict, Tuple
 
-from matplotlib.pyplot import box
-from torch.nn.modules import sparse
-from pycocotools.coco import COCO
-from torchvision.datasets.folder import DatasetFolder
-
-from typing_extensions import TypeAlias
-from util.box_ops import BboxFormatter, box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, box_xyxy_to_cxcywh3d, box_zxyzxy_to_cdcxcydwh, box_zzxxyy_to_zxyzxy
 import numpy as np
+import pandas as pd
 import pytorch_lightning as pl
+import SimpleITK as sitk
 import torch
-from torch.utils.data import DataLoader, Dataset
-from torchvision.datasets import Imacollate_fngeFolder, CocoDetection
-from util.misc import 
+import torchio as tio
+from matplotlib.pyplot import box
+from numpy.core.fromnumeric import ndim
+from pycocotools.coco import COCO
 from scipy import ndimage
+from torch.nn.modules import sparse
+from torch.utils.data import DataLoader, Dataset
+from torchvision.datasets import CocoDetection, ImageFolder
+from torchvision.datasets.folder import DatasetFolder
+from torchvision import transforms as T
 from tqdm import tqdm
+from typing_extensions import TypeAlias
+from util.box_ops import (BboxFormatter, box_cxcywh_to_xyxy,
+                          box_xyxy_to_cxcywh, box_xyxy_to_cxcywh3d,
+                          box_zxyzxy_to_cdcxcydwh, box_zzxxyy_to_zxyzxy)
+from util.misc import collate_fn
+from .transforms import Compose, NormalizeBbox, SafeCrop
+
 
 def is_np_file(path):
     return path.endswith(".npy") or path.endswith("npz")
 
-
-def load_npz(path:str) -> Dict[str, Any]:
-    with np.load(path) as npzfile:
-        return dict(npzfile)
-
-def load_npy(path:str) -> np.array:
-    with np.load(path) as npyfile:
-        return npyfile
 
 class DetectionDataset(CocoDetection):
 
@@ -93,8 +94,8 @@ class NPZDatasetBase(Dataset):
 
 class DataModuleBase(pl.LightningDataModule):
 
-    def __init__(self, hparams, collate_fn=None) -> None:
-        super().__init__()
+    def __init__(self, hparams, *args,  collate_fn=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         self.hparams = hparams
         self.collate = collate_fn
 
@@ -155,6 +156,124 @@ class MRIDataset(NPZDatasetBase):
     @property
     def coco(self):
         return self._coco
+
+
+class _MRISliceDataset(Dataset):
+
+    def __init__(self, items, transform=None):
+        super().__init__()
+        self.items = items
+        self.transform = transform
+        self.formatter = BboxFormatter()
+    
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, idx):
+        image, target = self.items[idx]
+        if self.transform is not None:
+            image, target = self.transform(image, target)
+        target["labels"] = target["labels"][0].unsqueeze(0)
+        target["boxes"] = target["boxes"].unsqueeze(0).float()
+        image = torch.as_tensor(image).unsqueeze(0)
+        print(target)
+        return image, target
+
+
+
+    
+
+class OverfitAugData(DataModuleBase):
+
+    def __init__(self, *args, train_transforms=None, val_transforms=None, test_transforms=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.train_transforms = Compose([SafeCrop(300, 300), NormalizeBbox(300, 300)])
+        self.val_transforms = val_transforms
+        self.test_transforms = test_transforms
+
+
+    def setup(self, stage=None):
+        items = []
+
+        for item in Path(self.hparams.datadir).iterdir():
+            with np.load(item) as f:
+                items.append((torch.as_tensor(f["image"], dtype=torch.float32), {"iscrowd": 0, "boxes": f["bbox"], "labels": torch.as_tensor([0])}))
+
+        
+        self.train_dataset = _MRISliceDataset(items, transform=getattr(self, "train_transforms", None))
+        self.val_dataset = _MRISliceDataset(items, transform=getattr(self, "train_transforms", None))
+
+
+class _MRISliceData(DataModuleBase):
+
+    def setup(self, stage=None):
+        sourcePath = Path("/vis/scratchN/oaiDataBase/v00/OAI/")
+        segmntPath = Path("/vis/scratchN/bzftacka/OAI_DESS_Data_AllTPs/Merged/v00/OAI")
+        stat = pd.read_csv(sourcePath/"statistics/SAG_3D_DESS_LEFT", sep=" ", header=None)
+        stat["id"] = stat[0].str.extract(r"(\d{7})")
+        stat["side"] = stat[1].map(lambda s: s.split("_")[-1]).str.lower()
+        stat.rename({0: "path"}, axis=1, inplace=True)
+        stat.drop([1, 2], axis=1, inplace=True)
+        stat.path = stat.path.map(Path)
+        imgp = lambda row: sourcePath/row.path
+        sgmp = lambda row: segmntPath/row.path/"Segmentation" 
+
+        reader = sitk.ImageSeriesReader()
+        (_, row) = next(stat.iterrows())
+
+        reader.SetFileNames(reader.GetGDCMSeriesFileNames(str(imgp(row))))
+        image = reader.Execute()
+        image = sitk.GetArrayFromImage(image)
+        reader.SetFileNames(reader.GetGDCMSeriesFileNames(str(sgmp(row))))
+        segmentation = reader.Execute()
+        segmentation = sitk.GetArrayFromImage(segmentation)
+
+        print(image.shape)
+        print(segmentation.shape)
+
+        (*_, (z1, *_), (z2, *_)) = ndimage.find_objects(segmentation)
+
+        indices = list(np.random.randint(z1.start + 10, z1.stop - 10, 2)) + list(np.random.randint(z2.start + 10, z2.stop - 10, 2))
+
+        items = []
+
+        for each in indices:
+            image_slice = image[each]
+            mask_slice = segmentation[each]
+
+            (*_, (ys, xs)) = ndimage.find_objects(mask_slice)
+
+
+            bbox = np.array([xs.start, ys.start, xs.stop - xs.start, ys.stop - ys.start])
+
+            items.append((
+                torch.as_tensor(image_slice.astype(np.int16)).unsqueeze(0),
+                {"boxes": torch.as_tensor(bbox), "labels": torch.as_tensor([0]),"iscrowd": torch.as_tensor([0])}
+            ))
+
+        self.train_dataset = _MRISliceDataset(items)
+        self.val_dataset = _MRISliceDataset(items)
+
+class MRISliceDetectionData(DataModuleBase):
+
+    def __init__(self, *args, **kwargs):
+        collate = kwargs.pop("collate_fn", collate_fn)
+        super().__init__(*args, collate_fn=collate, **kwargs)
+
+    def setup(self, stage=None):
+        root = Path(self.hparams.datadir)
+        is_valid = lambda path: path.suffix == ".npz"
+        for each in ("train", "val"):
+            path = root/each
+
+            for item in path.iterdir():
+                if is_valid(item):
+                    pass
+                    
+
+
+
+
 
 
 class MRISliceDataset(MRIDataset):
@@ -281,7 +400,13 @@ class LitBackboneData(DataModuleBase):
         self.train_dataset = LitBackboneDataSet(train_items)
         self.val_dataset = LitBackboneDataSet(val_items)    
 
+class SimpleOverfitWithAugDataModule(DataModuleBase):
 
+    def setup(self, stage=None):
+
+        root = Path("/scratch/visual/ashestak/detr/datasets/aug_sample")
+
+        train_dataset = MRISliceDataset(train_items, tra)
 
 class MRISliceDataModule(DataModuleBase):
 

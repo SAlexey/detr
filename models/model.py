@@ -67,12 +67,12 @@ class DetectorBase(ModelBase):
     
     def training_step(self, *args, **kwargs):
         out = super().training_step(*args, **kwargs)
-        self.log_dict({f"training_{loss}": value for loss, value in out["loss_dict"].items()}, on_epoch=True, on_step=True)
+        self.log_dict({f"training_{loss}": value for loss, value in out["loss_dict"].items()}, on_epoch=True, on_step=False)
         return out
 
     def validation_step(self, *args, **kwargs):
         out = super().validation_step(*args, **kwargs)
-        self.log_dict({f"validation_{loss}": value for loss, value in out["loss_dict"].items()}, on_epoch=True, on_step=True)
+        self.log_dict({f"validation_{loss}": value for loss, value in out["loss_dict"].items()}, on_epoch=True, on_step=False)
         return out
 
     @staticmethod
@@ -233,6 +233,20 @@ class DetrMRI(DetectorBase):
             losses = ['labels', 'boxes']
         )
         super().__init__(model, criterion, args)
+
+
+    def configure_optimizers(self):
+        param_dicts = [
+            {
+                "params": [p for n, p in self.named_parameters() if "backbone" not in n and p.requires_grad],
+                "lr": self.hparams.lr_transformer
+            },
+            {
+                "params": [p for n, p in self.named_parameters() if "backbone" in n and p.requires_grad],
+                "lr": self.hparams.lr_backbone,
+            },
+        ]
+        return torch.optim.AdamW(param_dicts, self.hparams.lr, weight_decay=self.hparams.weight_decay)
 
 
 

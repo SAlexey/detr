@@ -6,11 +6,41 @@ import random
 
 import PIL
 import torch
+from torchio.data.subject import Subject
 import torchvision.transforms as T
 import torchvision.transforms.functional as F
+import albumentations as A
+import torchio as tio
 
 from util.box_ops import box_xyxy_to_cxcywh
 from util.misc import interpolate
+
+
+class SafeCrop(object):
+
+    def __init__(self, width, height, p=0.5):
+        self.t = A.Compose(
+            [A.RandomSizedBBoxSafeCrop(width, height, erosion_rate=0.0, interpolation=1, always_apply=True, p=p)],
+            bbox_params=A.BboxParams(format="coco", label_fields=["labels"])
+        )
+
+    def __call__(self, inputs, targets):
+        transformed = self.t(image=inputs.numpy(), bboxes=[targets["boxes"]], labels=targets["labels"])
+        targets["boxes"] = transformed["bboxes"]
+        targets["labels"] = transformed["labels"]
+        return transformed["image"], targets
+
+class NormalizeBbox(object):
+
+    def __init__(self, rows, cols):
+        self.rows = rows 
+        self.cols = cols
+
+    def __call__(self, inputs, target):
+        boxes = target["boxes"][0]
+        div = torch.tensor([self.cols, self.rows, self.cols, self.rows], dtype=torch.float32)
+        target["boxes"] = torch.as_tensor(boxes) / div
+        return inputs, target
 
 
 def crop(image, target, region):

@@ -10,14 +10,14 @@
 #SBATCH --job-name=detr2d
 
 rootdir=/scratch/visual/ashestak
-datadir=$rootdir/oai/v00/numpy/full/
-num_workers=5
+datadir=$rootdir/detr/datasets/aug_sample
+num_workers=1
 num_classes=91
 num_queries=100
 max_epochs=500
-batch_size=16
+batch_size=4
 weights_save_path=checkpoints/
-experiment_name=2D_aug
+experiment_name=Overfit_Aug
 backbone_checkpoint_path=/scratch/visual/ashestak/detr/checkpoints/BackbonePretrain_500/epoch=24_validation_loss=0.030.ckpt
 overfit_batches=10
 gpus=1
@@ -29,8 +29,6 @@ export https_proxy="http://130.73.108.40:8080"
 export http_proxy="http://130.73.108.40:8080"
 
 exec python main.py --datadir $datadir \
-	--limit_train_batches $limit_train_batches \
-	--limit_val_batches $limit_val_batches \
 	--num_workers $num_workers \
 	--num_classes $num_classes \
 	--num_queries $num_queries \
