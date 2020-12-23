@@ -3,6 +3,9 @@ from datasets.data import MRIDataModule, MRISliceDataModule
 import os
 import time
 from argparse import ArgumentParser
+import hydra
+from hydra.utils import instantiate
+from omegaconf import DictConfig
 
 import pytorch_lightning as pl
 import torch
@@ -23,48 +26,20 @@ def get_argparse_args():
 
     return args
 
-def main():
+
+
+
+@hydra.main(config_path="conf", config_name="config")
+def main(cfg:DictConfig):
     args = get_argparse_args()
     
-    model = MeDeCl(args)
-    data = MRISliceDataModule(args)
-    logger = pl.loggers.TensorBoardLogger(save_dir="tb_logs", name=args.experiment_name)
-
-    checkpoint_root = Path(args.weights_save_path or "checkpoints")
-
-    if not checkpoint_root.exists():
-        checkpoint_root.mkdir()
-
-    checkpoint_dirpath = checkpoint_root / logger.name
-
-    if not checkpoint_dirpath.exists():
-        checkpoint_dirpath.mkdir()
-
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(
-            dirpath=checkpoint_dirpath,
-            filename="{epoch}_{validation_loss:.3f}",
-            monitor="validation_loss",
-        )
-
-    resume_from_checkpoint = args.resume_from_checkpoint
-    if args.resume:
-        # resume training taking the last saved checkppoint
-        checkpoints = sorted([ckpt for ckpt in checkpoint_dirpath.iterdir()])
-        if checkpoints:
-            resume_from_checkpoint = str(checkpoints[-1])
-            
-                
-
+    model = instantiate(cfg.model)
+    data = instantiate(cfg.data)
+    logger = instantiate(cfg.logger) if "logger" in cfg else True
+    callbacks = [instantiate(cb_cfg) for cb_cfg in cfg.callbacks] if cfg.callbacks.extra else []       
     metrics_callback = ModelMetricsAndLoggingBase()
-    coco_eval_callback = COCOEvaluationCallback()
-    best_and_worst_callback = BestAndWorstCaseCallback(5)
-    callbacks = [checkpoint_callback, best_and_worst_callback, metrics_callback]
-    trainer = pl.Trainer.from_argparse_args(
-            args,
-            logger=logger,
-            callbacks=callbacks,
-            resume_from_checkpoint=resume_from_checkpoint
-        )
+    callbacks = [checkpoint_callback, metrics_callback] + extra_callbacks
+    trainer = pl.Trainer(**cfg.trainer, logger=logger)
 
     if resume_from_checkpoint:
         print(trainer.callbacks)

@@ -1,16 +1,17 @@
 from argparse import ArgumentParser, Namespace
 from pickle import NONE
-
-from numpy.lib.arraysetops import isin
-from models.detr import DETR, SetCriterion, PostProcess
-from models.matcher import build_matcher
-
-import torch
-from models.transformer import build_transformer
-from models.backbone import build_backbone
 from typing import Any, List, Optional
+
 import pytorch_lightning as pl
-from torch import add
+import torch
+from hydra.utils import instantiate
+from numpy.lib.arraysetops import isin
+from torch import add, nn
+
+from models.backbone import build_backbone
+from models.detr import DETR, PostProcess, SetCriterion
+from models.matcher import build_matcher
+from models.transformer import build_transformer
 
 
 class ModelBase(pl.LightningModule):
@@ -160,11 +161,76 @@ class MeDeCl(DetectorBase):
         super().__init__(model, criterion, args)
 
     def configure_optimizers(self):
-        return torch.optim.AdamW([
-            {"params": self.model.backbone.parameters(), "lr": self.hparams.lr_backbone},
-            {"params": self.model.transformer.parameters(), "lr": self.hparams.lr_transformer}
-        ], self.hparams.lr, weight_decay=self.hparams.weight_decay)
+        param_dicts = [
+            {"params": [p for n, p in self.named_parameters() if "backbone" not in n and p.requires_grad]},
+            {
+                "params": [p for n, p in self.named_parameters() if "backbone" in n and p.requires_grad],
+                "lr": self.hparams.lr_backbone,
+            },
+        ]
+        return torch.optim.AdamW(param_dicts, self.hparams.lr, weight_decay=self.hparams.weight_decay)
 
+class LitModel(pl.LightningModule):
+
+    def __init__(self, model:nn.Module, criterion:nn.Module, config:Optional[Any]=None):
+        self.model = model 
+        self.criterion = criterion
+        self.config = config
+
+    def forward(self, *input: Any, **kwargs: Any):
+        return self.model(*input)
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.model.parameters(), self.hparams.lr)
+
+    def common_step(self, batch):
+        inputs, targets = batch
+        output = self.forward(inputs)
+        loss = self.criterion(output, targets)
+        return {"output": output, "loss": loss}
+
+    def training_step(self, batch, *args, **kwargs):
+        out = self.common_step(batch)    
+        self.log("training_loss", out["loss"], on_step=True, on_epoch=True)
+        return out
+
+    def validation_step(self, batch, *args, **kwargs):
+        out = self.common_step(batch)
+        self.log("validation_loss", out["loss"], on_step=True, on_epoch=True)
+        return out 
+
+    def test_step(self, batch, *args, **kwargs):
+        return self.common_step(batch)
+
+
+
+class SliceMeDNet(LitModel):
+
+    def __init__(self, config):
+        model = instantiate(config.model)
+        criterion = instantiate(config.criterion)
+        super().__init__(model, criterion, config)
+
+
+    def configure_optimizers(self):
+        param_dicts = [
+            {"params": [p for n, p in self.named_parameters() if "backbone" not in n and p.requires_grad]},
+            {
+                "params": [p for n, p in self.named_parameters() if "backbone" in n and p.requires_grad],
+                "lr": self.hparams.lr_backbone,
+            },
+        ]
+        optimizer = [instantiate(self.config.optimizer, param_dicts)]
+        if "lr_scheduler" in self.config:
+            scheduler = instantiate(self.config.scheduler)
+        else:
+            scheduler = []
+        return optimizer, scheduler
+
+
+
+
+    
 
 
 
