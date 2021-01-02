@@ -8,38 +8,52 @@ import pandas as pd
 from scipy import ndimage
 from torch.utils.data import random_split, DataLoader, Dataset, Subset
 from multiprocessing import Pool
+from util.misc import nested_tensor_from_tensor_list
 
 
 T = TypeVar("T")
 TrFunc = Callable[[T], T]
 SetupFunc = Callable[[pl.LightningDataModule, Optional[str]], None]
 
-class LabelMapToBBoxes(tio.transforms.Transform):
+LR_FLIP = tio.transforms.RandomFlip("LR", flip_probability=1)
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.args_names = []
+def label_map_to_bbox(subject: tio.Subject):
 
-    def apply_transform(self, subject: tio.Subject):
-        label_map = subject["label_map"][tio.DATA].squeeze() # remove channel dimension
-        objects = ndimage.find_objects(label_map)
+    """
+    Extracts menisci bounding boxes from a label map
+    and re-labels them to (0 and 1) 
 
-        bboxes = []
-        labels = []
+    the true labels of menisci in the label map is changed 
+    the ordering of the menisci in the label map is preserved
 
-        for label, (zs, ys, xs) in enumerate(objects):
-            bboxes.append([zs.start, xs.start, ys.start, zs.stop, xs.stop, ys.stop])
-            labels.append(label)
+    boxes are in format xyxy i.e [z0, y0, x0, z1, y1, x1] 
+    """
 
-        subject["labels"] = torch.as_tensor(labels, dtype=torch.long)
-        subject["boxes"] = torch.as_tensor(bboxes, dtype=torch.float32)
-        return subject
+    label_map = subject["label_map"][tio.DATA].squeeze() # remove channel dimension
+    objects = ndimage.find_objects(label_map, max_label=5) 
+    menisci = (o for o in objects[-2:] if o is not None) # only need menisci, if present
+    
+    bboxes = []
+    labels = []
 
+    for label, (zs, ys, xs) in enumerate(menisci):
+        bboxes.append([zs.start, xs.start, ys.start, zs.stop, xs.stop, ys.stop])
+        labels.append(label)
+
+    subject["labels"] = torch.as_tensor(labels, dtype=torch.long)
+    subject["boxes"] = torch.as_tensor(bboxes, dtype=torch.float32)
+    return subject
+
+
+def flip_left_to_right(subject: tio.Subject):
+    if subject["side"][0] == "left":
+        subject = LR_FLIP(subject)
+    return subject
 
 
 def collate_fn(batch):
     batch = list(zip(*batch))
-    # batch[0] = nested_tensor_from_tensor_list(batch[0])
+    batch[0] = nested_tensor_from_tensor_list(batch[0])
     return tuple(batch)
 
 class TransformableSubset(Dataset):
@@ -65,32 +79,6 @@ class TransformableSubset(Dataset):
     def __len__(self):
         return len(self.subset)
 
-
-class DetectionSubjectDataset(tio.SubjectsDataset):
-    """
-    Anatomical Structure Detection Dataset
-    from Full Knee MRI
-    """
-
-    def __getitem__(self, idx):
-        subject = super().__getitem__(idx)
-        label_map = subject["label_map"][tio.DATA].squeeze() # remove channel dimension
-        objects = ndimage.find_objects(label_map)
-
-        bboxes = []
-        labels = []
-
-        for label, (zs, ys, xs) in enumerate(objects):
-            bboxes.append([zs.start, xs.start, ys.start, zs.stop, xs.stop, ys.stop])
-            labels.append(label)
-
-        subject["labels"] = torch.as_tensor(labels, dtype=torch.long)
-        subject["boxes"] = torch.as_tensor(bboxes, dtype=torch.float32)
-
-        if self.transform is not None:
-            subject = self.transform(subject)
-             
-        return subject
 
 class SegmentedKMRIOAIv00(pl.LightningDataModule):         
 
@@ -165,7 +153,7 @@ class SegmentedKMRIOAIv00(pl.LightningDataModule):
         """
         failed = pd.read_csv("/scratch/visual/ashestak/oai/v00/numpy/full/failed.csv")
         failed = failed.groupby(["Unnamed: 0"]).get_group("path")["0"].values
-        
+
         subjects = subjects_from_dicom(num_workers=self.num_workers, ignore_paths=failed)
 
         full_dataset = tio.SubjectsDataset(subjects, transform=self.transforms)
@@ -224,11 +212,13 @@ def subjects_from_dicom(num_workers=1, ignore_paths=[]):
 def main():
 
     transforms = tio.Compose([
-        LabelMapToBBoxes(),
+        tio.transforms.Lambda(flip_left_to_right),
+        tio.transforms.Lambda(label_map_to_bbox),
         tio.transforms.RescaleIntensity(percentiles=[0.5, 99.5]),
-        tio.transforms.ZNormalization()])
+        tio.transforms.ZNormalization()
+    ])
 
-    dm = SegmentedKMRIOAIv00(num_workers=5, transforms=transforms)
+    dm = SegmentedKMRIOAIv00(num_workers=5, transforms=transforms, batch_size=4)
 
     dm.setup()
 
