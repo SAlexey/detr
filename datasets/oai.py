@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from scipy import ndimage
-from torch.utils.data import random_split, DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset, Subset, random_split as torch_random_split
 from tqdm.std import tqdm
 from enum import Enum
 
@@ -108,8 +108,6 @@ class OAIMRI(pl.LightningDataModule):
     def __init__(
             self, 
             *args, 
-            dataset_class=tio.SubjectsDataset,
-            subset_class=TransformableSubset,
             collate_fn: Optional[Callable[[Any], Any]] = None,
             batch_size: int = 1,
             num_workers: int = 1,
@@ -118,8 +116,6 @@ class OAIMRI(pl.LightningDataModule):
         ):
 
         super().__init__(*args, **kwargs)
-        self.dataset = dataset_class
-        self.subset = subset_class
         self.collate_fn = collate_fn
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -151,54 +147,9 @@ class OAIMRI(pl.LightningDataModule):
     
     def setup(self, stage=None):
 
-        src_img = Path("/vis/scratchN/oaiDataBase/v00/OAI/")
-        src_msk = Path("/vis/scratchN/bzftacka/OAI_DESS_Data_AllTPs/Merged/v00/OAI")
-        # get image path from the row
-        
-        imgp = lambda row: src_img/row.path
+        subjects = subjects_from_dicom()
 
-        # get segmentation path from the row
-        sgmp = lambda row: src_msk/row.path/"Segmentation"
-
-        statLeft = pd.read_csv(src_img/"statistics/SAG_3D_DESS_LEFT", sep=" ", header=None)
-        statRight = pd.read_csv(src_img/"statistics/SAG_3D_DESS_RIGHT", sep=" ", header=None)
-
-        # dataframe with all paths
-        stat = statLeft.append(statRight)
-
-        #extract patient id from path
-        stat["id"] = stat[0].str.extract(r"(\d{7})")
-
-        # extract side from the file name
-        stat["side"] = stat[1].map(lambda s: s.split("_")[-1]).str.lower()
-
-        # clean up 
-        stat.rename({0: "path"}, axis=1, inplace=True)
-        stat.drop([1, 2], axis=1, inplace=True)
-        stat.path = stat.path.map(Path)
-
-        # prepare items
-        subjects = []
-
-        failed = pd.read_csv("/scratch/visual/ashestak/oai/v00/numpy/full/failed.csv")
-        failed = failed.groupby(["Unnamed: 0"]).get_group("path")["0"].values
-
-        for i, row in tqdm(stat.iterrows(), total=len(stat), desc="Preparing Subjects"):
-            if row["path"] in failed:
-                continue
-
-            subject = tio.Subject(
-                image=tio.ScalarImage(imgp(row)),
-                label_map=tio.LabelMap(sgmp(row)),
-                side=row["side"],
-                id=row["id"]
-            )
-
-            subjects.append(subject)
-
-        print("Done!")
-
-        full_dataset = self.dataset(subjects)
+        full_dataset = tio.SubjectsDataset(subjects)
 
         total_len = len(subjects)
         train_len = int(round(total_len * 0.65))
@@ -215,9 +166,64 @@ class OAIMRI(pl.LightningDataModule):
 
         train_subset, val_subset, test_subset = random_split(full_dataset, [train_len, val_len, test_len])
 
-        self.train_dataset = self.subset(train_subset, transform=self.train_transforms)
-        self.val_dataset = self.subset(val_subset, transform=self.val_transforms)
-        self.test_dataset = self.subset(test_subset, transform=self.test_transforms)
+        train_subset.transform = self.train_transforms
+        val_subset.transform = self.val_transforms
+        test_subset.transform = self.test_transforms
+
+        self.train_dataset = train_subset
+        self.val_dataset = val_subset
+        self.test_dataset = test_subset
+
+def random_split(*args, subset_class=TransformableSubset, **kwargs):
+    return [subset_class(each) for each in torch_random_split(*args, **kwargs)]
+
+def subjects_from_dicom():
+    src_img = Path("/vis/scratchN/oaiDataBase/v00/OAI/")
+    src_msk = Path("/vis/scratchN/bzftacka/OAI_DESS_Data_AllTPs/Merged/v00/OAI")
+    # get image path from the row
+    
+    imgp = lambda row: src_img/row.path
+
+    # get segmentation path from the row
+    sgmp = lambda row: src_msk/row.path/"Segmentation"
+
+    statLeft = pd.read_csv(src_img/"statistics/SAG_3D_DESS_LEFT", sep=" ", header=None)
+    statRight = pd.read_csv(src_img/"statistics/SAG_3D_DESS_RIGHT", sep=" ", header=None)
+
+    # dataframe with all paths
+    stat = statLeft.append(statRight)
+
+    #extract patient id from path
+    stat["id"] = stat[0].str.extract(r"(\d{7})")
+
+    # extract side from the file name
+    stat["side"] = stat[1].map(lambda s: s.split("_")[-1]).str.lower()
+
+    # clean up 
+    stat.rename({0: "path"}, axis=1, inplace=True)
+    stat.drop([1, 2], axis=1, inplace=True)
+    stat.path = stat.path.map(Path)
+
+    # prepare items
+    subjects = []
+
+    failed = pd.read_csv("/scratch/visual/ashestak/oai/v00/numpy/full/failed.csv")
+    failed = failed.groupby(["Unnamed: 0"]).get_group("path")["0"].values
+
+    for _, row in tqdm(stat.iterrows(), total=len(stat), desc="Preparing Subjects"):
+        if row["path"] in failed:
+            continue
+
+        subject = tio.Subject(
+            image=tio.ScalarImage(imgp(row)),
+            label_map=tio.LabelMap(sgmp(row)),
+            side=row["side"],
+            id=row["id"]
+        )
+
+        subjects.append(subject)
+
+    return subjects
 
 
 def main():

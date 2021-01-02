@@ -1,3 +1,4 @@
+from omegaconf.dictconfig import DictConfig
 from datasets.oai import OAIMRI
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from util.misc import collate_fn
 
 from models.model import DetrMRI, MeDeCl
 from util.callbacks import BestAndWorstCaseCallback, COCOEvaluationCallback, ModelMetricsAndLoggingBase
+import hydra
+from hydra.utils import instantiate, call
 
 
 def get_argparse_args():
@@ -29,7 +32,18 @@ def get_argparse_args():
 
     return args
 
-def main():
+@hydra.main(config_path="conf", config_file="config")
+def main(cfg: DictConfig):
+    
+    trainer = pl.Trainer(**cfg.trainer)
+    model = instantiate(cfg.model)
+
+    trainer.fit()
+    
+    pass
+
+
+def _main():
     args = get_argparse_args()
     
     model = DetrMRI(args)
