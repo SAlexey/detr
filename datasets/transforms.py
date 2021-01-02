@@ -5,6 +5,7 @@ Transforms and data augmentation for both image + bbox.
 import random
 
 import PIL
+from scipy import ndimage
 import torch
 from torchio.data.subject import Subject
 import torchvision.transforms as T
@@ -14,6 +15,29 @@ import torchio as tio
 
 from util.box_ops import box_xyxy_to_cxcywh
 from util.misc import interpolate
+
+
+class LabelMapToBBoxes(tio.transforms.Transform):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.args_names = []
+
+    def apply_transform(self, subject: tio.Subject):
+        label_map = subject["label_map"][tio.DATA].squeeze() # remove channel dimension
+        objects = ndimage.find_objects(label_map)
+
+        bboxes = []
+        labels = []
+
+        for label, (zs, ys, xs) in enumerate(objects):
+            bboxes.append([zs.start, xs.start, ys.start, zs.stop, xs.stop, ys.stop])
+            labels.append(label)
+
+        subject["labels"] = torch.as_tensor(labels, dtype=torch.long)
+        subject["boxes"] = torch.as_tensor(bboxes, dtype=torch.float32)
+        return subject
+
 
 
 class SafeCrop(object):
