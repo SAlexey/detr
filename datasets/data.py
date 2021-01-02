@@ -24,11 +24,12 @@ from torchvision.datasets.folder import DatasetFolder
 from torchvision import transforms as T
 from tqdm import tqdm
 from typing_extensions import TypeAlias
-from util.box_ops import (BboxFormatter, box_cxcywh_to_xyxy,
+from util.box_ops import (convert, box_cxcywh_to_xyxy,
                           box_xyxy_to_cxcywh, box_xyxy_to_cxcywh3d,
                           box_zxyzxy_to_cdcxcydwh, box_zzxxyy_to_zxyzxy)
 from util.misc import collate_fn
 from .transforms import Compose, NormalizeBbox, SafeCrop
+from .oai import OAIMRI
 
 
 def is_np_file(path):
@@ -79,6 +80,7 @@ class NPYImageFolder(ImageFolder):
         is_valid_file = kwargs.pop("is_valid_file", is_np_file)
         super().__init__(*args, loader=loader, is_valid_file=is_valid_file, **kwargs)
 
+
 class NPZDatasetBase(Dataset):
 
     def __init__(self, items) -> None:
@@ -127,7 +129,7 @@ class MRIDataset(NPZDatasetBase):
         super().__init__(*args, **kwargs)
         self.transform = transform
         self._coco = defaultdict(lambda:COCO())
-        self.formatter = BboxFormatter()
+
         
     
     def __getitem__(self, idx):
@@ -164,7 +166,7 @@ class _MRISliceDataset(Dataset):
         super().__init__()
         self.items = items
         self.transform = transform
-        self.formatter = BboxFormatter()
+
     
     def __len__(self):
         return len(self.items)
@@ -317,7 +319,7 @@ class MRISliceDataset(MRIDataset):
            
             # rescale box back to image size
             # convert to [x1, y1, x2, y2]
-            box = self.formatter.convert(target["boxes"], "ccwh", "xyxy") * np.array((300,)*4)
+            box = convert(target["boxes"], "ccwh", "xyxy") * np.array((300,)*4)
 
             self.annotations.append({
                 "id": len(self.annotations),

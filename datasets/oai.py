@@ -1,19 +1,40 @@
-from typing import Any, Callable, Generic, Optional, TypeVar
-import warnings
+
+from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar, Union
 import torch
 import torchio as tio 
 import pytorch_lightning as pl
 from pathlib import Path
 import pandas as pd
-import numpy as np
 from scipy import ndimage
-from torch.utils.data import DataLoader, Dataset, Subset, random_split as torch_random_split
-from tqdm.std import tqdm
-from enum import Enum
+from torch.utils.data import random_split, DataLoader, Dataset, Subset
+from multiprocessing import Pool
+
 
 T = TypeVar("T")
 TrFunc = Callable[[T], T]
 SetupFunc = Callable[[pl.LightningDataModule, Optional[str]], None]
+
+class LabelMapToBBoxes(tio.transforms.Transform):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.args_names = []
+
+    def apply_transform(self, subject: tio.Subject):
+        label_map = subject["label_map"][tio.DATA].squeeze() # remove channel dimension
+        objects = ndimage.find_objects(label_map)
+
+        bboxes = []
+        labels = []
+
+        for label, (zs, ys, xs) in enumerate(objects):
+            bboxes.append([zs.start, xs.start, ys.start, zs.stop, xs.stop, ys.stop])
+            labels.append(label)
+
+        subject["labels"] = torch.as_tensor(labels, dtype=torch.long)
+        subject["boxes"] = torch.as_tensor(bboxes, dtype=torch.float32)
+        return subject
+
 
 
 def collate_fn(batch):
@@ -32,16 +53,6 @@ class TransformableSubset(Dataset):
     """
 
     def __init__(self, subset: Subset, transform:Optional[TrFunc] = None) -> None:
-        if not isinstance(subset, Subset):
-            raise ValueError(f"`subset` must be an instance of Subset, got {type(subset).__name__}")
-
-
-        if hasattr(subset.dataset, "transforms") and transform is not None:
-            warnings.warn(
-                f"""You have provided transforms to be applied to the ({type(subset.dataset).__name__}) 
-                but it already has transforms defined! 
-                Make sure this is intended, otherwise remove either of the transforms""")
-        
         self.subset = subset
         self.transform = transform
 
@@ -55,7 +66,7 @@ class TransformableSubset(Dataset):
         return len(self.subset)
 
 
-class OAIFullKMRIDetectionDataset(tio.SubjectsDataset):
+class DetectionSubjectDataset(tio.SubjectsDataset):
     """
     Anatomical Structure Detection Dataset
     from Full Knee MRI
@@ -63,70 +74,66 @@ class OAIFullKMRIDetectionDataset(tio.SubjectsDataset):
 
     def __getitem__(self, idx):
         subject = super().__getitem__(idx)
-        label_map = subject["label_map"][tio.DATA]
+        label_map = subject["label_map"][tio.DATA].squeeze() # remove channel dimension
         objects = ndimage.find_objects(label_map)
 
         bboxes = []
         labels = []
 
-        for label, (*_, zs, ys, xs) in enumerate(objects):
+        for label, (zs, ys, xs) in enumerate(objects):
             bboxes.append([zs.start, xs.start, ys.start, zs.stop, xs.stop, ys.stop])
             labels.append(label)
 
-        subject["labels"] = labels
-        subject["boxes"] = bboxes
+        subject["labels"] = torch.as_tensor(labels, dtype=torch.long)
+        subject["boxes"] = torch.as_tensor(bboxes, dtype=torch.float32)
+
+        if self.transform is not None:
+            subject = self.transform(subject)
              
         return subject
 
-class OAISliceKMRIDetectionDataset(OAIFullKMRIDetectionDataset):
+class SegmentedKMRIOAIv00(pl.LightningDataModule):         
 
-    def __getitem__(self, idx):
-        subject = super().__getitem__(idx)
-        obj_id = 5 if subject["side"] == "left" else 6
-        bbox = subject["boxes"][obj_id]
-        label = obj_id
-
-
-class OAIFullKMRIDetectionSubset(TransformableSubset):
-
-    def __init__(self, *args, extra_transforms=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.extra_transforms = extra_transforms
-
-    def __getitem__(self, idx: int):
-        item = super().__getitem__(idx)
-        if self.extra_transforms is not None:
-            item = self.extra_transforms(item)
-        return item["image"][tio.DATA], {"boxes": item["boxes"], "labels": item["labels"]}
-
-
-
-class OAIMRI(pl.LightningDataModule):         
-
-    """Osteoarthritis Initiative MRI Data Module"""     
+    """
+    Osteoarthritis Initiative MRI Data Segmented by Ambellan et al.
+        
+    """     
 
     def __init__(
             self, 
             *args, 
+            transforms: Optional[Callable[[Any], Any]] = None,
             collate_fn: Optional[Callable[[Any], Any]] = None,
             batch_size: int = 1,
             num_workers: int = 1,
-            shuffle: bool = True,
             **kwargs
         ):
+
+        """
+        Initializes the data module
+        Parameters:
+            batch_size:     (int) batch size used in the DataLoader
+            num_workers:    (int) number of processes used in the DataLoader
+            collate_fn:     (callable) function that collates the batch in the DataLoader
+            transforms:     (callable) transforms on ALL splits
+
+            train_transforms: (callable) transforms ONLY on train split
+            val_transforms:   (callable) transforms ONLY on val split
+            test_transforms:  (callable) transforms ONLY on test split
+        """
 
         super().__init__(*args, **kwargs)
         self.collate_fn = collate_fn
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.shuffle = shuffle
+        self.transforms = transforms
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, 
             batch_size=self.batch_size, 
             collate_fn=self.collate_fn,
             num_workers=self.num_workers,
-            shuffle=self.shuffle, 
+            shuffle=True, 
         )
 
     def val_dataloader(self):
@@ -144,27 +151,37 @@ class OAIMRI(pl.LightningDataModule):
             num_workers=self.num_workers,
             shuffle=False
         )
+
     
     def setup(self, stage=None):
+        """
+        Reads the following files:
 
-        subjects = subjects_from_dicom()
+        /vis/scratchN/oaiDataBase/v00/OAI/statistics/SAG_3D_DESS_LEFT
+        /vis/scratchN/oaiDataBase/v00/OAI/statistics/SAG_3D_DESS_RIGHT
 
-        full_dataset = tio.SubjectsDataset(subjects)
-
-        total_len = len(subjects)
-        train_len = int(round(total_len * 0.65))
-        test_len = total_len - train_len 
-        val_len = int(round(train_len * 0.05))
-        train_len -= val_len
+        concatennates them together into a single pandas dataframe
+        splits the paths into train test and val subsets 
+        """
+        failed = pd.read_csv("/scratch/visual/ashestak/oai/v00/numpy/full/failed.csv")
+        failed = failed.groupby(["Unnamed: 0"]).get_group("path")["0"].values
         
-        assert sum((train_len, val_len, test_len)) == total_len
+        subjects = subjects_from_dicom(num_workers=self.num_workers, ignore_paths=failed)
 
-        
-        print(f"# Train Subjects: {train_len}")
-        print(f"# Val Subjects: {val_len}")
-        print(f"# Test Subjects: {test_len}")
+        full_dataset = tio.SubjectsDataset(subjects, transform=self.transforms)
 
-        train_subset, val_subset, test_subset = random_split(full_dataset, [train_len, val_len, test_len])
+        num_total = len(full_dataset)
+        num_test = int(round(num_total * 0.3))
+        num_val = int(round((num_total - num_test) * 0.1))
+        num_train = num_total - num_test - num_val
+
+        print(f"Total: {num_total}", f"Train: {num_train}", f"Val: {num_val}", f"Test: {num_test}", sep="\n")
+
+        train_subset, val_subset, test_subset = random_split(full_dataset, (num_train, num_val, num_test))
+
+        self.train_dataset = TransformableSubset(train_subset, transform=self.train_transforms)
+        self.val_dataset = TransformableSubset(val_subset, transform=self.val_transforms)
+        self.test_dataset = TransformableSubset(test_subset, transform=self.test_transforms)
 
         train_subset.transform = self.train_transforms
         val_subset.transform = self.val_transforms
@@ -174,69 +191,49 @@ class OAIMRI(pl.LightningDataModule):
         self.val_dataset = val_subset
         self.test_dataset = test_subset
 
-def random_split(*args, subset_class=TransformableSubset, **kwargs):
-    return [subset_class(each) for each in torch_random_split(*args, **kwargs)]
 
-def subjects_from_dicom():
+def subjects_from_dicom(num_workers=1, ignore_paths=[]):
     src_img = Path("/vis/scratchN/oaiDataBase/v00/OAI/")
     src_msk = Path("/vis/scratchN/bzftacka/OAI_DESS_Data_AllTPs/Merged/v00/OAI")
-    # get image path from the row
-    
-    imgp = lambda row: src_img/row.path
-
-    # get segmentation path from the row
-    sgmp = lambda row: src_msk/row.path/"Segmentation"
 
     statLeft = pd.read_csv(src_img/"statistics/SAG_3D_DESS_LEFT", sep=" ", header=None)
     statRight = pd.read_csv(src_img/"statistics/SAG_3D_DESS_RIGHT", sep=" ", header=None)
 
-    # dataframe with all paths
     stat = statLeft.append(statRight)
 
-    #extract patient id from path
     stat["id"] = stat[0].str.extract(r"(\d{7})")
-
-    # extract side from the file name
     stat["side"] = stat[1].map(lambda s: s.split("_")[-1]).str.lower()
-
-    # clean up 
+    
     stat.rename({0: "path"}, axis=1, inplace=True)
-    stat.drop([1, 2], axis=1, inplace=True)
-    stat.path = stat.path.map(Path)
+    stat["path"] = stat["path"].map(Path)
 
-    # prepare items
-    subjects = []
+    stat["image"] = stat["path"].map(lambda p: tio.ScalarImage(src_img/p))
+    stat["label_map"] = stat["path"].map(lambda p: tio.LabelMap(src_msk/p/"Segmentation"))
 
-    failed = pd.read_csv("/scratch/visual/ashestak/oai/v00/numpy/full/failed.csv")
-    failed = failed.groupby(["Unnamed: 0"]).get_group("path")["0"].values
+    stat.mask(stat["path"].isin(ignore_paths), inplace=True)
+    stat.dropna(inplace=True, subset=["path"])
+    stat.drop([1, 2, "path"], axis=1, inplace=True)
 
-    for _, row in tqdm(stat.iterrows(), total=len(stat), desc="Preparing Subjects"):
-        if row["path"] in failed:
-            continue
-
-        subject = tio.Subject(
-            image=tio.ScalarImage(imgp(row)),
-            label_map=tio.LabelMap(sgmp(row)),
-            side=row["side"],
-            id=row["id"]
-        )
-
-        subjects.append(subject)
-
+    print(f"Preparing Subjects (num_proc={num_workers})")
+    with Pool(num_workers) as pool:
+        subjects = list(pool.imap_unordered(tio.Subject, stat.to_dict(orient="records"), chunksize=500))
+    print("Done!")
     return subjects
-
+    
 
 def main():
 
-    dm = OAIMRI(
-        dataset_class=OAIFullKMRIDetectionDataset, 
-        subset_class=OAIFullKMRIDetectionSubset, 
-        collate_fn=collate_fn
-    )
+    transforms = tio.Compose([
+        LabelMapToBBoxes(),
+        tio.transforms.RescaleIntensity(percentiles=[0.5, 99.5]),
+        tio.transforms.ZNormalization()])
+
+    dm = SegmentedKMRIOAIv00(num_workers=5, transforms=transforms)
 
     dm.setup()
 
-    item = next(iter(dm.train_dataloader()))
+    loader = dm.train_dataloader()
+    item = next(iter(loader))
     item
 
 if __name__ == "__main__":
