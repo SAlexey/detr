@@ -15,7 +15,7 @@ T = TypeVar("T")
 TrFunc = Callable[[T], T]
 SetupFunc = Callable[[pl.LightningDataModule, Optional[str]], None]
 
-LR_FLIP = tio.transforms.RandomFlip("LR", flip_probability=1)
+LR_FLIP = tio.transforms.RandomFlip(axes=("LR",), flip_probability=1)
 
 def label_map_to_bbox(subject: tio.Subject):
 
@@ -49,6 +49,12 @@ def flip_left_to_right(subject: tio.Subject):
     if subject["side"][0] == "left":
         subject = LR_FLIP(subject)
     return subject
+
+
+def collate_subjects(batch):
+    images = torch.stack[[s["image"][tio.DATA] for s  in batch]]
+    
+    pass
 
 
 def collate_fn(batch):
