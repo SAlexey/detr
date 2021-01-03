@@ -8,14 +8,11 @@ import pandas as pd
 from scipy import ndimage
 from torch.utils.data import random_split, DataLoader, Dataset, Subset
 from multiprocessing import Pool
-from util.misc import nested_tensor_from_tensor_list
 
 
 T = TypeVar("T")
 TrFunc = Callable[[T], T]
 SetupFunc = Callable[[pl.LightningDataModule, Optional[str]], None]
-
-LR_FLIP = tio.transforms.RandomFlip("LR", flip_probability=1)
 
 def label_map_to_bbox(subject: tio.Subject):
 
@@ -45,11 +42,55 @@ def label_map_to_bbox(subject: tio.Subject):
     return subject
 
 
-def flip_left_to_right(subject: tio.Subject):
-    if subject["side"][0] == "left":
-        subject = LR_FLIP(subject)
-    return subject
+class LabelMapToBbox(tio.transforms.Transform):
 
+    """
+        Extracts object bounding boxes from a label map
+        optionally filtering them depending on the obj. id    
+        and optionally re-labels them to (starting from 0) 
+
+        the ordering of the objects in the label map is preserved
+
+        boxes are in format xyxy i.e [z0, y0, x0, z1, y1, x1] 
+    """
+
+    def __init__(self, *args, keep_labels=[4, 5], reset_labels=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.args_names = []
+        self.keep_labels = keep_labels
+        self.reset_labels = reset_labels
+
+
+    def apply_transform(self, subject: tio.Subject):
+        label_map = subject["label_map"][tio.DATA].squeeze() # remove channel dimension
+        objects = ndimage.find_objects(label_map, max_label=max(self.keep_labels)) 
+        objects = (objects[keep] for keep in self.keep_labels)
+
+        objects = enumerate(objects) if self.reset_labels else zip(self.keep_labels, objects)
+        
+        bboxes = []
+        labels = []
+
+        for label, (zs, ys, xs) in objects:
+            bboxes.append([zs.start, xs.start, ys.start, zs.stop, xs.stop, ys.stop])
+            labels.append(label)
+
+        subject["labels"] = torch.as_tensor(labels, dtype=torch.long)
+        subject["boxes"] = torch.as_tensor(bboxes, dtype=torch.float32)
+        return subject
+
+
+class LRFlip(tio.transforms.Transform):
+
+    def __init__(self, *args, side="left", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.args_names = []
+        self.flip = tio.transforms.RandomFlip(axes=("LR",), flip_probability=1)
+
+    def apply_transform(self, subject: tio.Subject):
+        if subject["side"][0] == "left":
+            subject = self.flip(subject)
+        return subject
 
 def collate_fn(batch):
     batch = list(zip(*batch))
@@ -212,8 +253,8 @@ def subjects_from_dicom(num_workers=1, ignore_paths=[]):
 def main():
 
     transforms = tio.Compose([
-        tio.transforms.Lambda(flip_left_to_right),
-        tio.transforms.Lambda(label_map_to_bbox),
+        LRFlip(),
+        LabelMapToBbox(),
         tio.transforms.RescaleIntensity(percentiles=[0.5, 99.5]),
         tio.transforms.ZNormalization()
     ])
