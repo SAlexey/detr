@@ -1,5 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 from argparse import Namespace
+from datasets.oai import SegmentedKMRIOAIv00
 
 from torch.utils.data.dataloader import DataLoader
 from datasets.data import MRIDataModule
@@ -9,6 +10,8 @@ import unittest
 import torch
 from torch import nn, Tensor
 from typing import List
+import torchio as tio
+from datasets.transforms import LRFlip, LabelMapToBbox
 
 from models.matcher import HungarianMatcher
 from models.position_encoding import PositionEmbeddingSine, PositionEmbeddingLearned
@@ -16,13 +19,16 @@ from models.backbone import Backbone, Joiner, BackboneBase
 from util import box_ops
 from util.misc import NestedTensor, nested_tensor_from_tensor_list
 from hubconf import detr_resnet50, detr_resnet50_panoptic
-from util.box_ops import BboxFormatter
+from util.box_ops import convert
 
 # onnxruntime requires python 3.5 or above
 try:
     import onnxruntime
 except ImportError:
     onnxruntime = None
+
+
+
 
 
 class Tester(unittest.TestCase):
@@ -266,7 +272,6 @@ class DataModuleTester(unittest.TestCase):
 class BboxFormatterTester(unittest.TestCase):
 
     def setUp(self) -> None:
-        self.formatter = BboxFormatter()
         self.box_2d = torch.Tensor((0, 1)*2)
         self.box_3d = torch.Tensor((0, 1)*3)
         self.invalid_box = torch.Tensor((0, 1) * 4)
@@ -274,65 +279,83 @@ class BboxFormatterTester(unittest.TestCase):
     def test_xxyy_to_xyxy(self):
         self.assertListEqual(
             [0, 0, 0, 1, 1, 1],
-            list(self.formatter.convert(self.box_3d, "xxyy", "xyxy"))
+            list(convert(self.box_3d, "xxyy", "xyxy"))
         )
 
         self.assertListEqual(
             [0, 0, 1, 1],
-            list(self.formatter.convert(self.box_2d, "xxyy", "xyxy"))
+            list(convert(self.box_2d, "xxyy", "xyxy"))
         )
 
     def test_xxyy_to_xywh(self):
         self.assertListEqual(
             [0, 0, 0, 1, 1, 1],
-            list(self.formatter.convert(self.box_3d, "xxyy", "xywh"))
+            list(convert(self.box_3d, "xxyy", "xywh"))
         )
 
         self.assertListEqual(
             [0, 0, 1, 1],
-            list(self.formatter.convert(self.box_2d, "xxyy", "xywh"))
+            list(convert(self.box_2d, "xxyy", "xywh"))
         )
 
     def test_xxyy_to_ccwh(self):
         self.assertListEqual(
             [0.5, 0.5, 0.5, 1, 1, 1],
-            list(self.formatter.convert(self.box_3d, "xxyy", "ccwh"))
+            list(convert(self.box_3d, "xxyy", "ccwh"))
         )
 
         self.assertListEqual(
             [0.5, 0.5, 1, 1],
-            list(self.formatter.convert(self.box_2d, "xxyy", "ccwh"))
+            list(convert(self.box_2d, "xxyy", "ccwh"))
         )
 
     def test_ccwh_to_xyxy(self):
 
-        ccwh_2d = self.formatter.convert(self.box_2d, "xxyy", "ccwh")
-        ccwh_3d = self.formatter.convert(self.box_3d, "xxyy", "ccwh")
+        ccwh_2d = convert(self.box_2d, "xxyy", "ccwh")
+        ccwh_3d = convert(self.box_3d, "xxyy", "ccwh")
 
         self.assertListEqual(
             [0, 0, 0, 1, 1, 1],
-            list(self.formatter.convert(ccwh_3d, "ccwh", "xyxy"))
+            list(convert(ccwh_3d, "ccwh", "xyxy"))
         )
 
         self.assertListEqual(
             [0, 0, 1, 1],
-            list(self.formatter.convert(ccwh_2d, "ccwh", "xyxy"))
+            list(convert(ccwh_2d, "ccwh", "xyxy"))
         )
 
     def test_xywh_to_xyxy(self):
 
-        xywh_2d = self.formatter.convert(self.box_2d, "xxyy", "xywh")
-        xywh_3d = self.formatter.convert(self.box_3d, "xxyy", "xywh")
+        xywh_2d = convert(self.box_2d, "xxyy", "xywh")
+        xywh_3d = convert(self.box_3d, "xxyy", "xywh")
 
         self.assertListEqual(
             [0, 0, 0, 1, 1, 1],
-            list(self.formatter.convert(xywh_3d, "xywh", "xyxy"))
+            list(convert(xywh_3d, "xywh", "xyxy"))
         )
 
         self.assertListEqual(
             [0, 0, 1, 1],
-            list(self.formatter.convert(xywh_2d, "xywh", "xyxy"))
+            list(convert(xywh_2d, "xywh", "xyxy"))
         )
+
+class OAITester(unittest.TestCase):
+
+    def setUp(self):
+        transforms = tio.Compose([
+            LRFlip(),
+            tio.transforms.ToCanonical(),
+            LabelMapToBbox(),
+            tio.transforms.RescaleIntensity(percentiles=[0.5, 99.5]),
+            tio.transforms.ZNormalization()
+        ])
+        self.datamodule = SegmentedKMRIOAIv00(num_workers=5, batch_size=5, transforms=transforms)
+        self.datamodule.setup()
+
+    def test_foo(self):
+        for b in self.datamodule.train_dataloader():
+            b
+
 
 
 if __name__ == '__main__':
