@@ -2,6 +2,8 @@
 """
 DETR model and criterion classes.
 """
+from omegaconf.dictconfig import DictConfig
+from hydra.utils import instantiate
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -306,7 +308,27 @@ class MLP(nn.Module):
         return x
 
 
-def build(args):
+def build(cfg: DictConfig):
+    # the `num_classes` naming here is somewhat misleading.
+    # it indeed corresponds to `max_obj_id + 1`, where max_obj_id
+    # is the maximum id for a class in your dataset. For example,
+    # COCO has a max_obj_id of 90, so we pass `num_classes` to be 91.
+    # As another example, for a dataset that has a single class with id 1,
+    # you should pass `num_classes` to be 2 (max_obj_id + 1).
+    # For more details on this, check the following discussion
+    # https://github.com/facebookresearch/detr/issues/108#issuecomment-650269223
+
+    backbone = instantiate(cfg.backbone)
+    transformer = instantiate(cfg.transformer)
+    model = instantiate(cfg.model, backbone, transformer)
+    matcher = instantiate(cfg.matcher)
+    criterion = instantiate(cfg.criterion, matcher)
+    postprocessors = {'bbox': PostProcess()}
+    return model, criterion, postprocessors
+
+
+
+def _build(args):
     # the `num_classes` naming here is somewhat misleading.
     # it indeed corresponds to `max_obj_id + 1`, where max_obj_id
     # is the maximum id for a class in your dataset. For example,
@@ -324,10 +346,6 @@ def build(args):
     backbone = build_backbone(args)
 
     transformer = build_transformer(args)
-
-    input_proj = (torch.nn.Conv2d if args.input_dim == "2d" else torch.nn.Conv3d)(
-            backbone.num_channels, transformer.d_model, kernel_size=1
-        )
 
     model = DETR(
         backbone,

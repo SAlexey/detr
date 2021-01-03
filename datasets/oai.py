@@ -8,11 +8,12 @@ import pandas as pd
 from scipy import ndimage
 from torch.utils.data import random_split, DataLoader, Dataset, Subset
 from multiprocessing import Pool
-
+from util.misc import nested_tensor_from_tensor_list
 
 T = TypeVar("T")
 TrFunc = Callable[[T], T]
 SetupFunc = Callable[[pl.LightningDataModule, Optional[str]], None]
+
 
 def label_map_to_bbox(subject: tio.Subject):
 
@@ -91,6 +92,12 @@ class LRFlip(tio.transforms.Transform):
         if subject["side"][0] == "left":
             subject = self.flip(subject)
         return subject
+
+def collate_subjects(batch):
+    images = [s["image"][tio.DATA] for s in batch]
+    images = nested_tensor_from_tensor_list(images)
+    return images, batch
+
 
 def collate_fn(batch):
     batch = list(zip(*batch))

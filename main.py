@@ -1,3 +1,4 @@
+from models.detr import build
 from omegaconf.dictconfig import DictConfig
 from datasets.oai import OAIMRI
 from pathlib import Path
@@ -12,7 +13,7 @@ import pytorch_lightning as pl
 import torch
 from util.misc import collate_fn
 
-from models.model import DetrMRI, MeDeCl
+from models.model import DetrMRI, LitModel, MeDeCl
 from util.callbacks import BestAndWorstCaseCallback, COCOEvaluationCallback, ModelMetricsAndLoggingBase
 import hydra
 from hydra.utils import instantiate, call
@@ -36,11 +37,16 @@ def get_argparse_args():
 def main(cfg: DictConfig):
     
     trainer = pl.Trainer(**cfg.trainer)
-    model = instantiate(cfg.model)
-
-    trainer.fit()
+    datamodule = instantiate(cfg.datamodule)
+    model, criterion, postprocessors = build(cfg)
     
-    pass
+    model = LitModel(model, criterion, cfg.model)
+
+    trainer.fit(model, datamodule)
+    
+    if cfg.test:
+        trainer.test(model, datamodule)
+
 
 
 def _main():
