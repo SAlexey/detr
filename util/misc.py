@@ -11,6 +11,8 @@ from collections import defaultdict, deque
 import datetime
 import pickle
 from typing import Any, Optional, List, Union
+from typing import Optional, List
+from omegaconf import DictConfig
 
 import torch
 import torch.distributed as dist
@@ -21,6 +23,12 @@ import torchvision
 if float(torchvision.__version__[:3]) < 0.7:
     from torchvision.ops import _new_empty_tensor
     from torchvision.ops.misc import _output_size
+
+
+
+def instantiate_callbacks(cfg:DictConfig):
+    pass
+
 
 
 class SmoothedValue(object):

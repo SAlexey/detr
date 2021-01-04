@@ -141,10 +141,33 @@ class MeDeCl(Detector):
         super().__init__(model, criterion, args)
 
     def configure_optimizers(self):
-        return torch.optim.AdamW([
-            {"params": self.model.backbone.parameters(), "lr": self.hparams.lr_backbone},
-            {"params": self.model.transformer.parameters(), "lr": self.hparams.lr_transformer}
-        ], self.hparams.lr, weight_decay=self.hparams.weight_decay)
+        param_dicts = [
+            {"params": [p for n, p in self.named_parameters() if "backbone" not in n and p.requires_grad]},
+            {
+                "params": [p for n, p in self.named_parameters() if "backbone" in n and p.requires_grad],
+                "lr": self.hparams.lr_backbone,
+            },
+        ]
+        return torch.optim.AdamW(param_dicts, self.hparams.lr, weight_decay=self.hparams.weight_decay)
+
+class LitModel(pl.LightningModule):
+
+    def __init__(self, model:nn.Module, criterion:nn.Module, config:Optional[Any]=None):
+        self.model = model 
+        self.criterion = criterion
+        self.config = config
+
+    def forward(self, *input: Any, **kwargs: Any):
+        return self.model(*input)
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.model.parameters(), self.hparams.lr)
+
+    def common_step(self, batch):
+        inputs, targets = batch
+        output = self.forward(inputs)
+        loss = self.criterion(output, targets)
+        return {"output": output, "loss": loss}
 
 class DETR101_DC5(Detector):
 
