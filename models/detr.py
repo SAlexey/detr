@@ -3,7 +3,7 @@
 DETR model and criterion classes.
 """
 from omegaconf.dictconfig import DictConfig
-from hydra.utils import instantiate
+from hydra.utils import call, instantiate
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -22,7 +22,7 @@ from .transformer import build_transformer
 
 class DETR(nn.Module):
     """ This is the DETR module that performs object detection """
-    def __init__(self, backbone, transformer, num_classes, num_queries, aux_loss=False):
+    def __init__(self, backbone, transformer, num_classes, num_queries=10, aux_loss=False):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -232,7 +232,7 @@ class SetCriterion(nn.Module):
         indices = self.matcher(outputs_without_aux, targets)
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
-        num_boxes = sum(len(t["labels"]) for t in targets)
+        num_boxes = targets["boxes"].size(0) * targets["boxes"].size(1)
         num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
         if is_dist_avail_and_initialized():
             torch.distributed.all_reduce(num_boxes)
@@ -318,12 +318,14 @@ def build(cfg: DictConfig):
     # For more details on this, check the following discussion
     # https://github.com/facebookresearch/detr/issues/108#issuecomment-650269223
 
-    backbone = instantiate(cfg.backbone)
-    transformer = instantiate(cfg.transformer)
-    model = instantiate(cfg.model, backbone, transformer)
+    model, postprocessors = call(cfg.model)
+    body = model.backbone[0].body
+    conv1_weight = body.conv1.weight.data.mean(dim=1, keepdim=True)
+    body.conv1 = nn.Conv2d(1, body.conv1.out_channels, kernel_size=7, stride=2, padding=3,
+                        bias=False)
+    body.conv1.weight.data = conv1_weight
     matcher = instantiate(cfg.matcher)
-    criterion = instantiate(cfg.criterion, matcher)
-    postprocessors = {'bbox': PostProcess()}
+    criterion = instantiate(cfg.criterion, matcher=matcher)
     return model, criterion, postprocessors
 
 

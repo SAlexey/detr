@@ -13,45 +13,106 @@ import torchvision.transforms.functional as F
 import albumentations as A
 import torchio as tio
 
-from util.box_ops import box_xyxy_to_cxcywh
+from util.box_ops import box_xyxy_to_cxcywh, convert
 from util.misc import interpolate
+
+
+class ObjectSlice(tio.transforms.Transform):
+
+    def __init__(self, *args, obj_id=1, img_key="image", map_key="label_map", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.args_names = []
+        self.obj_id = obj_id
+        self.img_key = img_key
+        self.map_key = map_key
+
+    def apply_transform(self, subject: tio.Subject):
+
+        label_map = subject[self.map_key].data.squeeze()
+
+        obj = ndimage.find_objects(label_map, max_label=self.obj_id + 1)[self.obj_id-1]
+        assert obj is not None
+
+        sl = (obj[0].stop + obj[0].start) // 2 
+        subject[self.img_key].data = subject[self.img_key].data[:, sl].unsqueeze(0)
+        subject[self.map_key].data = subject[self.map_key].data[:, sl].unsqueeze(0)
+
+        return subject
 
 
 class LabelMapToBbox(tio.transforms.Transform):
 
     """
-        Extracts object bounding boxes from a label map
-        optionally filtering them depending on the obj. id    
-        and optionally re-labels them to (starting from 0) 
-
-        the ordering of the objects in the label map is preserved
-
-        boxes are in format xyxy i.e [z0, y0, x0, z1, y1, x1] 
+    Extracts object bounding boxes from a label map
+    boxes are in format xyxy i.e [z0, y0, x0, z1, y1, x1] 
     """
 
-    def __init__(self, *args, keep_labels=[4, 5], reset_labels=True, **kwargs):
+    def __init__(self, *args, label_mapping=None, max_label=0, map_key="label_map", boxes_key="boxes", labels_key="labels", boxes_fmt="xyxy", **kwargs):
         super().__init__(*args, **kwargs)
         self.args_names = []
-        self.keep_labels = keep_labels
-        self.reset_labels = reset_labels
+        self.label_mapping = label_mapping or {}
+        self.boxes_key = boxes_key
+        self.labels_key = labels_key
+        self.map_key = map_key
+        self.max_label = max_label
+        self.boxes_fmt = boxes_fmt
+
+        assert isinstance(self.label_mapping, dict)
 
 
     def apply_transform(self, subject: tio.Subject):
-        label_map = subject["label_map"][tio.DATA].squeeze() # remove channel dimension
-        objects = ndimage.find_objects(label_map, max_label=max(self.keep_labels) + 1) 
-        objects = [objects[keep] for keep in self.keep_labels]
-
-        objects = enumerate(objects) if self.reset_labels else zip(self.keep_labels, objects)
+        label_map = subject[self.map_key][tio.DATA].squeeze() # remove single dim axes
+        objects = ndimage.find_objects(label_map, max_label=self.max_label) 
         
         bboxes = []
         labels = []
 
-        for label, (zs, ys, xs) in objects:
-            bboxes.append([zs.start, xs.start, ys.start, zs.stop, xs.stop, ys.stop])
-            labels.append(label)
+        for label, slices in enumerate(objects): 
+            if slices is not None:
+                b0, b1 = list(zip(*[(xs.start, xs.stop) for xs in slices]))
+                bboxes.append(list(b0 + b1))
+                labels.append(self.label_mapping.get(label, label))
 
-        subject["labels"] = torch.as_tensor(labels, dtype=torch.long)
-        subject["boxes"] = torch.as_tensor(bboxes, dtype=torch.float32)
+        bboxes = torch.as_tensor(bboxes, dtype=torch.float32)
+        labels = torch.as_tensor(labels, dtype=torch.long)
+
+        if self.boxes_fmt != "xyxy":
+
+            bboxes = convert(bboxes, "xyxy", self.boxes_fmt)
+
+
+        subject[self.labels_key] = labels
+        subject[self.boxes_key] = bboxes
+
+        return subject
+
+
+class NormalizeBbox(tio.transforms.Transform):
+
+    def __init__(self, *args, scale_fct=None, boxes_key="boxes", boxes_fmt="xyxy", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.args_names = []
+        self.scale_fct = scale_fct 
+        self.boxes_key = boxes_key
+        self.boxes_fmt = boxes_fmt
+
+
+    def apply_transform(self, subject: tio.Subject):
+
+        boxes = subject[self.boxes_key]
+
+        assert boxes.size(-1) // 2 == len(self.scale_fct)
+
+        if self.boxes_fmt != "xyxy": # convert to xyxy format for scaling
+            boxes = convert(boxes, self.boxes_fmt, "xyxy")
+
+        boxes = boxes / torch.as_tensor(self.scale_fct + self.scale_fct, dtype=torch.float32)
+
+        if self.boxes_fmt != "xyxy": # convert back to the original format
+            boxes = convert(boxes, "xyxy", self.boxes_fmt)
+
+        subject[self.boxes_key] = boxes
+
         return subject
 
 
@@ -82,17 +143,17 @@ class SafeCrop(object):
         targets["labels"] = transformed["labels"]
         return transformed["image"], targets
 
-class NormalizeBbox(object):
+# class NormalizeBbox(object):
 
-    def __init__(self, rows, cols):
-        self.rows = rows 
-        self.cols = cols
+#     def __init__(self, rows, cols):
+#         self.rows = rows 
+#         self.cols = cols
 
-    def __call__(self, inputs, target):
-        boxes = target["boxes"][0]
-        div = torch.tensor([self.cols, self.rows, self.cols, self.rows], dtype=torch.float32)
-        target["boxes"] = torch.as_tensor(boxes) / div
-        return inputs, target
+#     def __call__(self, inputs, target):
+#         boxes = target["boxes"][0]
+#         div = torch.tensor([self.cols, self.rows, self.cols, self.rows], dtype=torch.float32)
+#         target["boxes"] = torch.as_tensor(boxes) / div
+#         return inputs, target
 
 
 def crop(image, target, region):

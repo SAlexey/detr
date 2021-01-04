@@ -9,94 +9,12 @@ from scipy import ndimage
 from torch.utils.data import random_split, DataLoader, Dataset, Subset
 from multiprocessing import Pool
 from util.misc import nested_tensor_from_tensor_list
+from .transforms import *
 
 T = TypeVar("T")
 TrFunc = Callable[[T], T]
 SetupFunc = Callable[[pl.LightningDataModule, Optional[str]], None]
 
-
-def label_map_to_bbox(subject: tio.Subject):
-
-    """
-    Extracts menisci bounding boxes from a label map
-    and re-labels them to (0 and 1) 
-
-    the true labels of menisci in the label map is changed 
-    the ordering of the menisci in the label map is preserved
-
-    boxes are in format xyxy i.e [z0, y0, x0, z1, y1, x1] 
-    """
-
-    label_map = subject["label_map"][tio.DATA].squeeze() # remove channel dimension
-    objects = ndimage.find_objects(label_map, max_label=5) 
-    menisci = (o for o in objects[-2:] if o is not None) # only need menisci, if present
-    
-    bboxes = []
-    labels = []
-
-    for label, (zs, ys, xs) in enumerate(menisci):
-        bboxes.append([zs.start, xs.start, ys.start, zs.stop, xs.stop, ys.stop])
-        labels.append(label)
-
-    subject["labels"] = torch.as_tensor(labels, dtype=torch.long)
-    subject["boxes"] = torch.as_tensor(bboxes, dtype=torch.float32)
-    return subject
-
-
-class LabelMapToBbox(tio.transforms.Transform):
-
-    """
-        Extracts object bounding boxes from a label map
-        optionally filtering them depending on the obj. id    
-        and optionally re-labels them to (starting from 0) 
-
-        the ordering of the objects in the label map is preserved
-
-        boxes are in format xyxy i.e [z0, y0, x0, z1, y1, x1] 
-    """
-
-    def __init__(self, *args, keep_labels=[4, 5], reset_labels=True, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.args_names = []
-        self.keep_labels = keep_labels
-        self.reset_labels = reset_labels
-
-
-    def apply_transform(self, subject: tio.Subject):
-        label_map = subject["label_map"][tio.DATA].squeeze() # remove channel dimension
-        objects = ndimage.find_objects(label_map, max_label=max(self.keep_labels)) 
-        objects = (objects[keep] for keep in self.keep_labels)
-
-        objects = enumerate(objects) if self.reset_labels else zip(self.keep_labels, objects)
-        
-        bboxes = []
-        labels = []
-
-        for label, (zs, ys, xs) in objects:
-            bboxes.append([zs.start, xs.start, ys.start, zs.stop, xs.stop, ys.stop])
-            labels.append(label)
-
-        subject["labels"] = torch.as_tensor(labels, dtype=torch.long)
-        subject["boxes"] = torch.as_tensor(bboxes, dtype=torch.float32)
-        return subject
-
-
-class LRFlip(tio.transforms.Transform):
-
-    def __init__(self, *args, side="left", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.args_names = []
-        self.flip = tio.transforms.RandomFlip(axes=("LR",), flip_probability=1)
-
-    def apply_transform(self, subject: tio.Subject):
-        if subject["side"][0] == "left":
-            subject = self.flip(subject)
-        return subject
-
-def collate_subjects(batch):
-    images = [s["image"][tio.DATA] for s in batch]
-    images = nested_tensor_from_tensor_list(images)
-    return images, batch
 
 
 def collate_fn(batch):
@@ -127,7 +45,6 @@ class TransformableSubset(Dataset):
     def __len__(self):
         return len(self.subset)
 
-
 class SegmentedKMRIOAIv00(pl.LightningDataModule):         
 
     """
@@ -138,8 +55,8 @@ class SegmentedKMRIOAIv00(pl.LightningDataModule):
     def __init__(
             self, 
             *args, 
-            transforms: Optional[Callable[[Any], Any]] = None,
-            collate_fn: Optional[Callable[[Any], Any]] = None,
+            transforms: Optional[List[Callable[[Any], Any]]] = [],
+            collate_fn: Optional[List[Callable[[Any], Any]]] = None,
             batch_size: int = 1,
             num_workers: int = 1,
             **kwargs
@@ -150,8 +67,8 @@ class SegmentedKMRIOAIv00(pl.LightningDataModule):
         Parameters:
             batch_size:     (int) batch size used in the DataLoader
             num_workers:    (int) number of processes used in the DataLoader
-            collate_fn:     (callable) function that collates the batch in the DataLoader
-            transforms:     (callable) transforms on ALL splits
+            collate_fn:     (list[callable]) function that collates the batch in the DataLoader
+            transforms:     (list[callable]) transforms on ALL splits
 
             train_transforms: (callable) transforms ONLY on train split
             val_transforms:   (callable) transforms ONLY on val split
@@ -163,6 +80,15 @@ class SegmentedKMRIOAIv00(pl.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.transforms = transforms
+
+        self.train_transforms = self.train_transforms or []
+        self.val_transforms = self.val_transforms or []
+        self.test_transforms = self.test_transforms or []
+
+        assert isinstance(self.train_transforms, list)
+        assert isinstance(self.val_transforms, list)
+        assert isinstance(self.test_transforms, list)
+
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, 
@@ -204,28 +130,54 @@ class SegmentedKMRIOAIv00(pl.LightningDataModule):
 
         subjects = subjects_from_dicom(num_workers=self.num_workers, ignore_paths=failed)
 
-        full_dataset = tio.SubjectsDataset(subjects, transform=self.transforms)
+        transforms = tio.Compose([
+            LRFlip(),                                        # flips left knee to right 
+            tio.ToCanonical(),                               # puts axis defining sag-plane first
+            tio.RescaleIntensity(percentiles=[0.5, 99.5]),   # rescales intensity to be in [0, 1]
+            tio.ZNormalization(),                            # sets mean 0 and std 1 
+            tio.RemapLabels({1:0, 2:0, 3:0, 4:0, 5:1, 6:0}), # only one meniscus is nonzero
+        ] + self.train_transforms)
+
+        train_transforms = tio.Compose([
+            tio.RandomAffine(
+                p=0.5,  
+                degrees=(90, 90, 0, 0, 0, 0)                # rotate 90 deg around sag-axis
+            ),
+            tio.RandomAffine(
+                p=0.5,
+                degrees=(5, 0, 0),                          # rotate +/- 5 deg around sag-axis
+                translation=(0, 2, 2),                      # translate +/- 2 mm in the non sag-planes
+                scales=(0.9, 1.2),                          # rescale between 0.9 - 1.2 
+                isotropic=True  
+            ),
+            tio.RandomFlip(axes=("AP", "IS")),              # Anterior-Posterior Interior-Superior flips
+            tio.Crop((0, 42, 42)),                          # crop image to (160, 300, 300) 
+            ObjectSlice(obj_id=1),                          # get middle slice of meniscus
+            LabelMapToBbox(),                               # extracts bbox 
+            NormalizeBbox(scale_fct=(300, 300))             # scale bbox by the image size
+        ] + self.train_transforms)
+
+        val_transforms = tio.Compose([
+            tio.Crop((0, 42, 42)),                          # crop image to (160, 300, 300) 
+            ObjectSlice(obj_id=1),                          # get middle slice of meniscus
+            LabelMapToBbox(),                               # extracts bbox 
+            NormalizeBbox(scale_fct=(300, 300))             # scale bbox by the image size
+        ] + self.val_transforms)
+
+        full_dataset = tio.SubjectsDataset(subjects, transform=transforms)
 
         num_total = len(full_dataset)
-        num_test = int(round(num_total * 0.3))
-        num_val = int(round((num_total - num_test) * 0.1))
+        num_test = int(round(num_total * 0.25))
+        num_val = int(round(num_total * 0.05))
         num_train = num_total - num_test - num_val
 
         print(f"Total: {num_total}", f"Train: {num_train}", f"Val: {num_val}", f"Test: {num_test}", sep="\n")
 
         train_subset, val_subset, test_subset = random_split(full_dataset, (num_train, num_val, num_test))
 
-        self.train_dataset = TransformableSubset(train_subset, transform=self.train_transforms)
-        self.val_dataset = TransformableSubset(val_subset, transform=self.val_transforms)
-        self.test_dataset = TransformableSubset(test_subset, transform=self.test_transforms)
-
-        train_subset.transform = self.train_transforms
-        val_subset.transform = self.val_transforms
-        test_subset.transform = self.test_transforms
-
-        self.train_dataset = train_subset
-        self.val_dataset = val_subset
-        self.test_dataset = test_subset
+        self.train_dataset = TransformableSubset(train_subset, transform=train_transforms)
+        self.val_dataset = TransformableSubset(val_subset, transform=val_transforms)
+        self.test_dataset = TransformableSubset(test_subset, transform=val_transforms)
 
 
 def subjects_from_dicom(num_workers=1, ignore_paths=[]):
@@ -257,23 +209,4 @@ def subjects_from_dicom(num_workers=1, ignore_paths=[]):
     return subjects
     
 
-def main():
-
-    transforms = tio.Compose([
-        LRFlip(),
-        LabelMapToBbox(),
-        tio.transforms.RescaleIntensity(percentiles=[0.5, 99.5]),
-        tio.transforms.ZNormalization()
-    ])
-
-    dm = SegmentedKMRIOAIv00(num_workers=5, transforms=transforms, batch_size=4)
-
-    dm.setup()
-
-    loader = dm.train_dataloader()
-    item = next(iter(loader))
-    item
-
-if __name__ == "__main__":
-    main()
 

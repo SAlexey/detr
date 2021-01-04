@@ -1,0 +1,58 @@
+experiment: 
+  name: MyFirstHydraExperiment
+  test: False
+
+trainer: 
+  fast_dev_run: 1
+  gpus: 1 
+  max_epochs: 500
+  limit_train_bactehs: 100 
+  limit_val_bacthes: 10 
+  limit_test_batches: 100
+  num_sanity_val_steps: 4
+  # resume_from_checkpoint: ./checkpoints/${experiment.name}/resume.ckpt 
+
+
+checkpoint:
+  _target_: pytorch_lightning.callbacks.ModelCheckpoint
+  dirpath: ./checkpoints/${experiment.name}/
+  filename: "{epoch}-{val_loss:.2f}"
+  monitor: validation_loss
+  mode: min
+  save_top_k: 3
+  
+hparams: 
+  lr: 0.001 
+  lr_backbone: 0.001 
+  lr_transformer: 0.001 
+  weight_decay: 0.0001
+
+model: 
+  _target_: hubconf.detr_resnet101_dc5
+  num_classes: 91
+  pretrained: True
+  return_postprocessor: True
+
+datamodule:
+  _target_: datasets.oai.SegmentedKMRIOAIv00
+  batch_size: 4 
+  num_workers: 5 
+
+matcher: 
+  _target_: models.matcher.HungarianMatcher
+  cost_class: 1 
+  cost_bbox: 2 
+  cost_giou: 2   
+
+criterion: 
+  _target_: models.detr.SetCriterion
+  num_classes: ${model.num_classes}
+  losses: 
+    # - labels 
+    - boxes 
+    # - cardinality 
+  eos_coef: 0.10
+  weight_dict: 
+    loss_ce: 1 
+    loss_bbox: 5 
+    loss_giou: 2 
