@@ -29,7 +29,6 @@ from util.box_ops import (convert, box_cxcywh_to_xyxy,
                           box_zxyzxy_to_cdcxcydwh, box_zzxxyy_to_zxyzxy)
 from util.misc import collate_fn
 from .transforms import Compose, NormalizeBbox, SafeCrop
-from .oai import OAIMRI
 
 
 def is_np_file(path):

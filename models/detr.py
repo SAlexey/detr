@@ -2,6 +2,8 @@
 """
 DETR model and criterion classes.
 """
+from omegaconf.dictconfig import DictConfig
+from hydra.utils import call, instantiate
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -20,7 +22,7 @@ from .transformer import build_transformer
 
 class DETR(nn.Module):
     """ This is the DETR module that performs object detection """
-    def __init__(self, backbone, transformer, num_classes, num_queries, aux_loss=False):
+    def __init__(self, backbone, transformer, num_classes, num_queries=10, aux_loss=False):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -230,7 +232,7 @@ class SetCriterion(nn.Module):
         indices = self.matcher(outputs_without_aux, targets)
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
-        num_boxes = sum(len(t["labels"]) for t in targets)
+        num_boxes = targets["boxes"].size(0) * targets["boxes"].size(1)
         num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
         if is_dist_avail_and_initialized():
             torch.distributed.all_reduce(num_boxes)
@@ -306,7 +308,29 @@ class MLP(nn.Module):
         return x
 
 
-def build(args):
+def build(cfg: DictConfig):
+    # the `num_classes` naming here is somewhat misleading.
+    # it indeed corresponds to `max_obj_id + 1`, where max_obj_id
+    # is the maximum id for a class in your dataset. For example,
+    # COCO has a max_obj_id of 90, so we pass `num_classes` to be 91.
+    # As another example, for a dataset that has a single class with id 1,
+    # you should pass `num_classes` to be 2 (max_obj_id + 1).
+    # For more details on this, check the following discussion
+    # https://github.com/facebookresearch/detr/issues/108#issuecomment-650269223
+
+    model, postprocessors = call(cfg.model)
+    body = model.backbone[0].body
+    conv1_weight = body.conv1.weight.data.mean(dim=1, keepdim=True)
+    body.conv1 = nn.Conv2d(1, body.conv1.out_channels, kernel_size=7, stride=2, padding=3,
+                        bias=False)
+    body.conv1.weight.data = conv1_weight
+    matcher = instantiate(cfg.matcher)
+    criterion = instantiate(cfg.criterion, matcher=matcher)
+    return model, criterion, postprocessors
+
+
+
+def _build(args):
     # the `num_classes` naming here is somewhat misleading.
     # it indeed corresponds to `max_obj_id + 1`, where max_obj_id
     # is the maximum id for a class in your dataset. For example,
@@ -324,10 +348,6 @@ def build(args):
     backbone = build_backbone(args)
 
     transformer = build_transformer(args)
-
-    input_proj = (torch.nn.Conv2d if args.input_dim == "2d" else torch.nn.Conv3d)(
-            backbone.num_channels, transformer.d_model, kernel_size=1
-        )
 
     model = DETR(
         backbone,

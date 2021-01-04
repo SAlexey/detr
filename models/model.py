@@ -1,4 +1,5 @@
 from argparse import ArgumentParser, Namespace
+from util.misc import NestedTensor, nested_tensor_from_tensor_list
 from hubconf import detr_resnet101_dc5
 from pickle import NONE
 from typing import Any, Dict, List, Optional
@@ -15,9 +16,9 @@ from models.matcher import build_matcher
 from models.transformer import build_transformer
 from omegaconf import DictConfig
 from hydra.utils import instantiate
+import torchio as tio
 
-
-class ModelBase(pl.LightningModule):
+class LitModel(pl.LightningModule):
 
     def __init__(self, model:torch.nn.Module, criterion:torch.nn.Module, hparams:Optional[Namespace]=None) -> None:
         super().__init__()
@@ -25,65 +26,57 @@ class ModelBase(pl.LightningModule):
         self.criterion = criterion
         self.save_hyperparameters(hparams)
 
-    def forward(self, *input: Any, **kwargs: Any):
-        return self.model(*input)
+    def forward(self, batch):
+        return self.model(batch)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.model.parameters(), self.hparams.lr)
+        param_dicts = [
+            {
+                "params": [p for n, p in self.named_parameters() if "backbone" not in n and p.requires_grad],
+                "lr": self.hparams.lr_transformer
+            },
+            {
+                "params": [p for n, p in self.named_parameters() if "backbone" in n and p.requires_grad],
+                "lr": self.hparams.lr_backbone,
+            },
+        ]
+        return torch.optim.AdamW(param_dicts, self.hparams.lr, weight_decay=self.hparams.weight_decay)
 
     def common_step(self, batch):
-        inputs, targets = batch
+        inputs = batch["image"][tio.DATA]
+        inputs = NestedTensor(inputs, torch.zeros_like(inputs))
         output = self.forward(inputs)
-        loss = self.criterion(output, targets)
-        return {"output": output, "loss": loss}
-
-    def training_step(self, batch, *args, **kwargs):
-        return self.common_step(batch)
-
-    def validation_step(self, batch, *args, **kwargs):
-        return self.common_step(batch) 
-
-    def test_step(self, batch, *args, **kwargs):
-        return self.common_step(batch)
-
-class Detector(ModelBase):
-
-    def __init__(self,*args, postprocessors: Optional[Dict[str, Any]] = None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.postprocessors = postprocessors
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.model.parameters(), self.hparams.lr)
-
-    def common_step(self, batch):
-        out = super().common_step(batch)
+        losses_dict = self.criterion(output, batch)
         weight_dict = self.criterion.weight_dict
-        out["loss_dict"] = out["loss"]
-        out["loss"] = sum(weight_dict[k] * out["loss"][k] for k in weight_dict)
-        return out
+        output["loss_dict"] = losses_dict
+        output["loss"] = sum(weight_dict[k] * losses_dict[k] for k in weight_dict)
+        return output
     
-    def training_step(self, *args, **kwargs):
-        out = super().training_step(*args, **kwargs)
+    def training_step(self, batch, *args, **kwargs):
+        out = self.common_step(batch)
         loss_dict = {f"training_{loss}": value for loss, value in out["loss_dict"].items()}
         self.log_dict(loss_dict, on_epoch=True, on_step=False)
         return out
 
-    def validation_step(self, *args, **kwargs):
-        out = super().validation_step(*args, **kwargs)
+    def validation_step(self, batch, *args, **kwargs):
+        out = self.common_step(batch)
         loss_dict = {f"validation_{loss}": value for loss, value in out["loss_dict"].items()}
         self.log_dict(loss_dict, on_epoch=True, on_step=False)
         return out
 
-class LitBackbone(ModelBase):
+    def test_step(self, batch, *args, **kwargs):
+        return self.common_step(batch)
 
-    def __init__(self, args):
-        model = resnet50(pretrained=True, replace_stride_with_dilation=[False, False, True])
-        criterion = nn.CrossEntropyLoss()
-        super().__init__(model, criterion, args) 
-        conv1 = model.conv1
-        model.conv1 = nn.Conv2d(1, conv1.out_channels, conv1.kernel_size, conv1.stride, conv1.padding, bias=False)
-        model.conv1.weight.data = conv1.weight.data.mean(dim=1, keepdim=True)
-        model.fc = nn.Linear(2048, 3, bias=True)
+
+class LitBackbone(pl.LightningModule):
+
+    def __init__(self, hparams):
+        self.model = resnet50(pretrained=True, replace_stride_with_dilation=[False, False, True])
+        self.criterion = nn.CrossEntropyLoss()
+        conv1 = self.model.conv1
+        self.model.conv1 = nn.Conv2d(1, conv1.out_channels, conv1.kernel_size, conv1.stride, conv1.padding, bias=False)
+        self.model.conv1.weight.data = conv1.weight.data.mean(dim=1, keepdim=True)
+        self.model.fc = nn.Linear(2048, 3, bias=True)
         self.accuracy = pl.metrics.classification.Accuracy()
 
     def common_step(self, batch):
@@ -106,8 +99,6 @@ class LitBackbone(ModelBase):
         self.accuracy(predictions.indices.squeeze(), batch[1].squeeze())
         self.log("validation_accuracy", self.accuracy, on_epoch=True)
         return out
-
-        
 
 class MeDeCl(Detector):
     def __init__(self, args) -> None:
@@ -155,11 +146,6 @@ class MeDeCl(Detector):
             {"params": self.model.transformer.parameters(), "lr": self.hparams.lr_transformer}
         ], self.hparams.lr, weight_decay=self.hparams.weight_decay)
 
-
-class Detector3D(Detector):
-    pass
-
-
 class DETR101_DC5(Detector):
 
     def __init__(self, cfg:DictConfig):
@@ -175,8 +161,7 @@ class DETR101_DC5(Detector):
         criterion = instantiate(cfg.criterion, matcher)
         super().__init__(model, criterion, postprocessors=postprocessors)
 
-
-class DetrMRI(DetectorBase):
+class DetrMRI(Detector):
 
     def __init__(self, args):
         model, postprocessors = detr_resnet101_dc5(pretrained=True, return_postprocessor=True)
