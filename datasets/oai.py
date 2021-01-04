@@ -16,15 +16,6 @@ TrFunc = Callable[[T], T]
 SetupFunc = Callable[[pl.LightningDataModule, Optional[str]], None]
 
 
-
-def collate_subjects(batch):
-    images = torch.cat([s["image"][tio.DATA] for s in batch])
-    images = nested_tensor_from_tensor_list(images)
-    
-    
-    pass
-
-
 def collate_fn(batch):
     batch = list(zip(*batch))
     batch[0] = nested_tensor_from_tensor_list(batch[0])
@@ -152,15 +143,15 @@ class SegmentedKMRIOAIv00(pl.LightningDataModule):
             ),
             tio.RandomFlip(axes=("AP", "IS")),              # Anterior-Posterior Interior-Superior flips
             tio.Crop((0, 42, 42)),                          # crop image to (160, 300, 300) 
-            ObjectSlice(obj_id=1),                          # get middle slice of meniscus
-            LabelMapToBbox(),                               # extracts bbox 
+            ObjectSlice(),                                  # get middle slice of meniscus
+            LabelMapToBbox(boxes_fmt="ccwh"),               # extracts bbox 
             NormalizeBbox(scale_fct=(300, 300))             # scale bbox by the image size
         ] + self.train_transforms)
 
         val_transforms = tio.Compose([
             tio.Crop((0, 42, 42)),                          # crop image to (160, 300, 300) 
-            ObjectSlice(obj_id=1),                          # get middle slice of meniscus
-            LabelMapToBbox(),                               # extracts bbox 
+            ObjectSlice(),                                  # get middle slice of meniscus
+            LabelMapToBbox(boxes_fmt="ccwh"),               # extracts bbox 
             NormalizeBbox(scale_fct=(300, 300))             # scale bbox by the image size
         ] + self.val_transforms)
 

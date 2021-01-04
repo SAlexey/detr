@@ -43,19 +43,31 @@ class ObjectSlice(tio.transforms.Transform):
 class LabelMapToBbox(tio.transforms.Transform):
 
     """
-    Extracts object bounding boxes from a label map
-    boxes are in format xyxy i.e [z0, y0, x0, z1, y1, x1] 
+    Extracts object bounding boxes from a segmentation map using ndimage.find_objects
+
+    writes output back into the subject object
+    
+    Parameters: 
+        map_key: (string) key for the input segmentation (segmentation_map = subject[map_key])
+        tgt_key: (string) key for the output labels
+        box_key: (string) key for the output boxes
+        box_fmt: (string) format specifier for the output boxes 
+            choices are: xyxy (default), xxyy, xywh, ccwh 
+
+    Notes:
+        Additionally adds keys:
+            num_oobjects: (list) a list containing an int - the number of bounding boxes found in the map 
+
     """
 
-    def __init__(self, *args, label_mapping=None, max_label=0, map_key="label_map", boxes_key="boxes", labels_key="labels", boxes_fmt="xyxy", **kwargs):
+    def __init__(self, *args, max_label=0, map_key="label_map", tgt_key="labels", box_key="boxes", box_fmt="xyxy", **kwargs):
         super().__init__(*args, **kwargs)
         self.args_names = []
-        self.label_mapping = label_mapping or {}
-        self.boxes_key = boxes_key
-        self.labels_key = labels_key
+        self.box_key = box_key
+        self.tgt_key = tgt_key
         self.map_key = map_key
         self.max_label = max_label
-        self.boxes_fmt = boxes_fmt
+        self.box_fmt = box_fmt
 
         assert isinstance(self.label_mapping, dict)
 
@@ -69,20 +81,19 @@ class LabelMapToBbox(tio.transforms.Transform):
 
         for label, slices in enumerate(objects): 
             if slices is not None:
-                b0, b1 = list(zip(*[(xs.start, xs.stop) for xs in slices]))
-                bboxes.append(list(b0 + b1))
+                left, right = zip(*((xs.start, xs.stop) for xs in slices))
+                bboxes.append(list(left + right))
                 labels.append(self.label_mapping.get(label, label))
+
+        subject["num_objects"] = len(bboxes)
 
         bboxes = torch.as_tensor(bboxes, dtype=torch.float32)
         labels = torch.as_tensor(labels, dtype=torch.long)
 
-        if self.boxes_fmt != "xyxy":
+        bboxes = convert(bboxes, "xyxy", self.box_fmt)
 
-            bboxes = convert(bboxes, "xyxy", self.boxes_fmt)
-
-
-        subject[self.labels_key] = labels
-        subject[self.boxes_key] = bboxes
+        subject[self.tgt_key] = labels
+        subject[self.box_key] = bboxes
 
         return subject
 
