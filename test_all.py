@@ -73,7 +73,6 @@ class Tester(unittest.TestCase):
         backbone = Backbone('resnet50', True, False, False)
         torch.jit.script(backbone)  # noqa
 
-    @unittest.skip("not in my scope, ... yet...")
     def test_model_script_detection(self):
         model = detr_resnet50(pretrained=False).eval()
         scripted_model = torch.jit.script(model)
@@ -83,8 +82,6 @@ class Tester(unittest.TestCase):
         self.assertTrue(out["pred_logits"].equal(out_script["pred_logits"]))
         self.assertTrue(out["pred_boxes"].equal(out_script["pred_boxes"]))
     
-    
-    @unittest.skip("not in my scope, ... yet...")
     def test_model_script_panoptic(self):
         model = detr_resnet50_panoptic(pretrained=False).eval()
         scripted_model = torch.jit.script(model)
@@ -95,7 +92,6 @@ class Tester(unittest.TestCase):
         self.assertTrue(out["pred_boxes"].equal(out_script["pred_boxes"]))
         self.assertTrue(out["pred_masks"].equal(out_script["pred_masks"]))
 
-    @unittest.skip("not in my scope, ... yet...")
     def test_model_detection_different_inputs(self):
         model = detr_resnet50(pretrained=False).eval()
         # support NestedTensor
@@ -111,7 +107,7 @@ class Tester(unittest.TestCase):
         out = model([x])
         self.assertIn('pred_logits', out)
 
-    @unittest.skip("not my code not my problem")
+
     def test_warpped_model_script_detection(self):
         class WrappedDETR(nn.Module):
             def __init__(self, model):
@@ -131,7 +127,6 @@ class Tester(unittest.TestCase):
         out_script = scripted_model(x)
         self.assertTrue(out["pred_logits"].equal(out_script["pred_logits"]))
         self.assertTrue(out["pred_boxes"].equal(out_script["pred_boxes"]))
-
 
 @unittest.skipIf(onnxruntime is None, 'ONNX Runtime unavailable')
 class ONNXExporterTester(unittest.TestCase):
@@ -214,7 +209,6 @@ class ONNXExporterTester(unittest.TestCase):
             tolerate_small_mismatch=True,
         )
 
-@unittest.skip("just because")
 class DataModuleTester(unittest.TestCase):
 
     def setUp(self) -> None:
