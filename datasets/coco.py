@@ -13,23 +13,12 @@ import torchvision
 from pycocotools import mask as coco_mask
 import json
 import time
-
+from enum import Enum
 
 import datasets.transforms as T
 
 
-class COCOWrapper(COCO):
-
-    def __init__(self, annotation_file=None):
-        super().__init__(annotation_file=None)
-        if not annotation_file == None:
-            print('loading annotations into memory...')
-            tic = time.time()
-            dataset = json.load(annotation_file)
-            assert type(dataset)==dict, 'annotation file format {} not supported'.format(type(dataset))
-            print('Done (t={:0.2f}s)'.format(time.time()- tic))
-            self.dataset = dataset
-            self.createIndex()
+AnatomicalPlane = Enum("AnatomicalPlane", "CORONAL SAGITTAL AXIAL")
 
 
 class CocoDetection(torchvision.datasets.CocoDetection):
@@ -46,6 +35,10 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         if self._transforms is not None:
             img, target = self._transforms(img, target)
         return img, target
+
+
+class DetectionDataset(CocoDetection):
+    pass
 
 
 def convert_coco_poly_to_mask(segmentations, height, width):

@@ -17,6 +17,14 @@ SetupFunc = Callable[[pl.LightningDataModule, Optional[str]], None]
 
 
 
+def collate_subjects(batch):
+    images = torch.cat([s["image"][tio.DATA] for s in batch])
+    images = nested_tensor_from_tensor_list(images)
+    
+    
+    pass
+
+
 def collate_fn(batch):
     batch = list(zip(*batch))
     batch[0] = nested_tensor_from_tensor_list(batch[0])
@@ -116,15 +124,7 @@ class SegmentedKMRIOAIv00(pl.LightningDataModule):
 
     
     def setup(self, stage=None):
-        """
-        Reads the following files:
-
-        /vis/scratchN/oaiDataBase/v00/OAI/statistics/SAG_3D_DESS_LEFT
-        /vis/scratchN/oaiDataBase/v00/OAI/statistics/SAG_3D_DESS_RIGHT
-
-        concatennates them together into a single pandas dataframe
-        splits the paths into train test and val subsets 
-        """
+        
         failed = pd.read_csv("/scratch/visual/ashestak/oai/v00/numpy/full/failed.csv")
         failed = failed.groupby(["Unnamed: 0"]).get_group("path")["0"].values
 
@@ -181,6 +181,20 @@ class SegmentedKMRIOAIv00(pl.LightningDataModule):
 
 
 def subjects_from_dicom(num_workers=1, ignore_paths=[]):
+    """
+        Reads the following files:
+
+        /vis/scratchN/oaiDataBase/v00/OAI/statistics/SAG_3D_DESS_LEFT
+        /vis/scratchN/oaiDataBase/v00/OAI/statistics/SAG_3D_DESS_RIGHT
+
+        concatennates them together into a single pandas dataframe
+        creates a list of subjects containing keys
+         - image:  mri images
+         - label_map: segmentation
+         - id: patient id
+         - side: leg side
+    """
+
     src_img = Path("/vis/scratchN/oaiDataBase/v00/OAI/")
     src_msk = Path("/vis/scratchN/bzftacka/OAI_DESS_Data_AllTPs/Merged/v00/OAI")
 
