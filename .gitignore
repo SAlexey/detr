@@ -10,7 +10,8 @@
 datasets/data/
 checkpoints/
 */logs/
-*logs/
+*log*/
+outputs/
 experiment-*
 *.tmp
 *.pkl

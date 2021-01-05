@@ -13,7 +13,7 @@ def main(cfg: DictConfig):
     model, criterion, postprocessors = build(cfg)
     model = LitModel(model, criterion, cfg.hparams)
 
-    trainer = pl.Trainer.from_argparse_args(cfg.trainer, callbacks=[checkpoint])
+    trainer = instantiate(cfg.trainer, callbacks=[checkpoint])
     trainer.fit(model, datamodule=datamodule)
     
     if cfg.experiment.test:

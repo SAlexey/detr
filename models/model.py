@@ -49,18 +49,20 @@ class LitModel(pl.LightningModule):
         losses_dict = self.criterion(output, batch)
         weight_dict = self.criterion.weight_dict
         output["loss_dict"] = losses_dict
-        output["loss"] = sum(weight_dict[k] * losses_dict[k] for k in weight_dict)
-        return output
+        loss = sum(weight_dict[k] * losses_dict[k] for k in weight_dict)
+        return loss, output
     
     def training_step(self, batch, *args, **kwargs):
-        out = self.common_step(batch)
+        training_loss, out = self.common_step(batch)
         loss_dict = {f"training_{loss}": value for loss, value in out["loss_dict"].items()}
+        self.log("training_loss", training_loss)
         self.log_dict(loss_dict, on_epoch=True, on_step=False)
         return out
 
     def validation_step(self, batch, *args, **kwargs):
-        out = self.common_step(batch)
+        validation_loss, out = self.common_step(batch)
         loss_dict = {f"validation_{loss}": value for loss, value in out["loss_dict"].items()}
+        self.log("validation_loss", validation_loss)
         self.log_dict(loss_dict, on_epoch=True, on_step=False)
         return out
 

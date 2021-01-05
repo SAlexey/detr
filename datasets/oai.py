@@ -139,20 +139,21 @@ class SegmentedKMRIOAIv00(pl.LightningDataModule):
                 degrees=(5, 0, 0),                          # rotate +/- 5 deg around sag-axis
                 translation=(0, 2, 2),                      # translate +/- 2 mm in the non sag-planes
                 scales=(0.9, 1.2),                          # rescale between 0.9 - 1.2 
-                isotropic=True  
+                isotropic=True,
+                image_interpolation="nearest"  
             ),
             tio.RandomFlip(axes=("AP", "IS")),              # Anterior-Posterior Interior-Superior flips
             tio.Crop((0, 42, 42)),                          # crop image to (160, 300, 300) 
             ObjectSlice(),                                  # get middle slice of meniscus
-            LabelMapToBbox(boxes_fmt="ccwh"),               # extracts bbox 
-            NormalizeBbox(scale_fct=(300, 300))             # scale bbox by the image size
+            LabelMapToBbox(box_fmt="ccwh"),                 # extracts bbox 
+            NormalizeBbox(img_size=(300, 300))              # scale bbox by the image size
         ] + self.train_transforms)
 
         val_transforms = tio.Compose([
             tio.Crop((0, 42, 42)),                          # crop image to (160, 300, 300) 
             ObjectSlice(),                                  # get middle slice of meniscus
-            LabelMapToBbox(boxes_fmt="ccwh"),               # extracts bbox 
-            NormalizeBbox(scale_fct=(300, 300))             # scale bbox by the image size
+            LabelMapToBbox(box_fmt="ccwh"),                 # extracts bbox 
+            NormalizeBbox(img_size=(300, 300))              # scale bbox by the image size
         ] + self.val_transforms)
 
         full_dataset = tio.SubjectsDataset(subjects, transform=transforms)

@@ -50,9 +50,11 @@ class LabelMapToBbox(tio.transforms.Transform):
     Parameters: 
         map_key: (string) key for the input segmentation (segmentation_map = subject[map_key])
         tgt_key: (string) key for the output labels
+        tgt_map: (dict)   an optional remapping of target keys
         box_key: (string) key for the output boxes
         box_fmt: (string) format specifier for the output boxes 
             choices are: xyxy (default), xxyy, xywh, ccwh 
+
 
     Notes:
         Additionally adds keys:
@@ -60,30 +62,31 @@ class LabelMapToBbox(tio.transforms.Transform):
 
     """
 
-    def __init__(self, *args, max_label=0, map_key="label_map", tgt_key="labels", box_key="boxes", box_fmt="xyxy", **kwargs):
+    def __init__(self, *args, max_tgt=0, map_key="label_map", tgt_key="labels", box_key="boxes", box_fmt="xyxy", tgt_map=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.args_names = []
         self.box_key = box_key
         self.tgt_key = tgt_key
+        self.tgt_map = tgt_map or dict()
         self.map_key = map_key
-        self.max_label = max_label
+        self.max_tgt = max_tgt
         self.box_fmt = box_fmt
 
-        assert isinstance(self.label_mapping, dict)
+        assert isinstance(self.tgt_map, dict)
 
 
     def apply_transform(self, subject: tio.Subject):
-        label_map = subject[self.map_key][tio.DATA].squeeze() # remove single dim axes
-        objects = ndimage.find_objects(label_map, max_label=self.max_label) 
+        label_map = subject[self.map_key].data.long().squeeze() # remove single dim axes
+        objects = ndimage.find_objects(label_map, max_label=self.max_tgt) 
         
         bboxes = []
         labels = []
 
-        for label, slices in enumerate(objects): 
-            if slices is not None:
-                left, right = zip(*((xs.start, xs.stop) for xs in slices))
+        for tgt, sls in enumerate(objects): 
+            if sls is not None:
+                left, right = zip(*((s.start, s.stop) for s in sls))
                 bboxes.append(list(left + right))
-                labels.append(self.label_mapping.get(label, label))
+                labels.append(self.tgt_map.get(tgt, tgt))
 
         subject["num_objects"] = len(bboxes)
 
@@ -100,29 +103,27 @@ class LabelMapToBbox(tio.transforms.Transform):
 
 class NormalizeBbox(tio.transforms.Transform):
 
-    def __init__(self, *args, scale_fct=None, boxes_key="boxes", boxes_fmt="xyxy", **kwargs):
+    """
+    Assume box_fmt in (ccwh, xyxy)
+    
+    """
+
+    def __init__(self, *args, img_size=None, box_key="boxes", **kwargs):
         super().__init__(*args, **kwargs)
         self.args_names = []
-        self.scale_fct = scale_fct 
-        self.boxes_key = boxes_key
-        self.boxes_fmt = boxes_fmt
+        self.fct = img_size 
+        self.box_key = box_key
 
 
     def apply_transform(self, subject: tio.Subject):
 
-        boxes = subject[self.boxes_key]
+        boxes = subject[self.box_key]
 
-        assert boxes.size(-1) // 2 == len(self.scale_fct)
+        assert boxes.size(-1) // 2 == len(self.fct)
 
-        if self.boxes_fmt != "xyxy": # convert to xyxy format for scaling
-            boxes = convert(boxes, self.boxes_fmt, "xyxy")
+        boxes = boxes / torch.as_tensor(self.fct + self.fct, dtype=torch.float32, device=boxes.device)
 
-        boxes = boxes / torch.as_tensor(self.scale_fct + self.scale_fct, dtype=torch.float32)
-
-        if self.boxes_fmt != "xyxy": # convert back to the original format
-            boxes = convert(boxes, "xyxy", self.boxes_fmt)
-
-        subject[self.boxes_key] = boxes
+        subject[self.box_key] = boxes
 
         return subject
 
@@ -132,10 +133,13 @@ class LRFlip(tio.transforms.Transform):
     def __init__(self, *args, side="left", **kwargs):
         super().__init__(*args, **kwargs)
         self.args_names = []
+        self.side = side
         self.flip = tio.transforms.RandomFlip(axes=("LR",), flip_probability=1)
 
     def apply_transform(self, subject: tio.Subject):
-        if subject["side"][0] == "left":
+        assert "side" in subject
+        
+        if subject["side"][0] == self.side:
             subject = self.flip(subject)
         return subject
 

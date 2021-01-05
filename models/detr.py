@@ -112,7 +112,7 @@ class SetCriterion(nn.Module):
         empty_weight[-1] = self.eos_coef
         self.register_buffer('empty_weight', empty_weight)
 
-    def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
+    def loss_labels(self, outputs, targets, indices, num_boxes, log=False):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
@@ -120,7 +120,7 @@ class SetCriterion(nn.Module):
         src_logits = outputs['pred_logits']
 
         idx = self._get_src_permutation_idx(indices)
-        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+        target_classes_o = targets["labels"].flatten(0, 1)
         target_classes = torch.full(src_logits.shape[:2], self.num_classes,
                                     dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
@@ -155,7 +155,7 @@ class SetCriterion(nn.Module):
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        target_boxes = targets["boxes"].flatten(0, 1)
 
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
 
