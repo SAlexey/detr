@@ -14,7 +14,6 @@ trainer:
   limit_val_batches: 10 
   limit_test_batches: 100
   num_sanity_val_steps: 4
-  resume_from_checkpoint: /scratch/visual/ashestak/detr/outputs/${experiment.name}/resume.ckpt 
 
 
 checkpoint:
