@@ -1,9 +1,7 @@
 experiment:
   name: MyFirstHydraExperiment
-
-
-test: False
-
+  test: False
+  resume: False
 
 trainer: 
   _target_: pytorch_lightning.Trainer
@@ -13,9 +11,7 @@ trainer:
   limit_train_batches: 100 
   limit_val_batches: 10 
   limit_test_batches: 100
-  num_sanity_val_steps: 4
-  resume_from_checkpoint: /scratch/visual/ashestak/detr/outputs/${experiment.name}/resume.ckpt 
-
+  num_sanity_val_steps: 1
 
 checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint
