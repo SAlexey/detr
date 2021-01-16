@@ -187,8 +187,8 @@ def subjects_from_dicom(num_workers=1, ignore_paths=[]):
          - side: leg side
     """
 
-    src_img = Path("/vis/scratchN/oaiDataBase/v00/OAI/")
-    src_msk = Path("/vis/scratchN/bzftacka/OAI_DESS_Data_AllTPs/Merged/v00/OAI")
+    src_img = Path("sample/images/vis/scratchN/oaiDataBase/v00/OAI/")
+    src_msk = Path("sample/masks/vis/scratchN/bzftacka/OAI_DESS_Data_AllTPs/Merged/v00/OAI")
 
     statLeft = pd.read_csv(src_img/"statistics/SAG_3D_DESS_LEFT", sep=" ", header=None)
     statRight = pd.read_csv(src_img/"statistics/SAG_3D_DESS_RIGHT", sep=" ", header=None)
@@ -213,6 +213,46 @@ def subjects_from_dicom(num_workers=1, ignore_paths=[]):
         subjects = list(pool.imap_unordered(tio.Subject, stat.to_dict(orient="records"), chunksize=500))
     print("Done!")
     return subjects
+
+
+def _subjects_from_dicom(num_workers=1, ignore_paths=[]):
+    """
+        Reads the following files:
+
+        /vis/scratchN/oaiDataBase/v00/OAI/statistics/SAG_3D_DESS_LEFT
+        /vis/scratchN/oaiDataBase/v00/OAI/statistics/SAG_3D_DESS_RIGHT
+
+        concatennates them together into a single pandas dataframe
+        creates a list of subjects containing keys
+         - image:  mri images
+         - label_map: segmentation
+         - id: patient id
+         - side: leg side
+    """
+
+    src_img = Path("sample/images/vis/scratchN/oaiDataBase/v00/OAI/")
+    src_msk = Path("sample/masks/vis/scratchN/bzftacka/OAI_DESS_Data_AllTPs/Merged/v00/OAI")
+
+    statLeft = pd.read_csv(src_img/"statistics/SAG_3D_DESS_LEFT", sep=" ", header=None)
+    statRight = pd.read_csv(src_img/"statistics/SAG_3D_DESS_RIGHT", sep=" ", header=None)
+
+    stat = statLeft.append(statRight)
+
+    stat["id"] = stat[0].str.extract(r"(\d{7})")
+    stat["side"] = stat[1].map(lambda s: s.split("_")[-1]).str.lower()
     
+    stat.rename({0: "path"}, axis=1, inplace=True)
+    stat["path"] = stat["path"].map(Path)
 
+    stat["image"] = stat["path"].map(lambda p: tio.ScalarImage(src_img/p))
+    stat["label_map"] = stat["path"].map(lambda p: tio.LabelMap(src_msk/p/"Segmentation"))
 
+    stat.mask(stat["path"].isin(ignore_paths), inplace=True)
+    stat.dropna(inplace=True, subset=["path"])
+    stat.drop([1, 2, "path"], axis=1, inplace=True)
+
+    print(f"Preparing Subjects (num_proc={num_workers})")
+    with Pool(num_workers) as pool:
+        subjects = list(pool.imap_unordered(tio.Subject, stat.to_dict(orient="records"), chunksize=500))
+    print("Done!")
+    return subjects

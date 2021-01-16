@@ -1,8 +1,7 @@
 experiment:
   name: MyFirstHydraExperiment
-
-
-test: False
+  test: False
+  resume: False
 
 
 trainer: 
