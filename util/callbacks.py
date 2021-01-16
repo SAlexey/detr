@@ -4,6 +4,8 @@ from collections import defaultdict
 from copy import copy
 from pathlib import Path
 from typing import Callable, List
+from math import ceil
+from torch import nn
 
 import numpy as np
 
@@ -18,9 +20,13 @@ from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from torchvision.ops import box_iou
 from tqdm import tqdm
+from torchvision import ops
 
 from util.box_ops import BboxFormatter, box_cxcywh_to_xyxy
 from util.gradcam import GradCam
+from enum import Enum
+
+STAGE = Enum("STAGE", (("TRAIN", "training"), ("VAL", "validation"), ("TEST", "test")))
 
 COCO_EVAL_NAMES = ("AP_coco", "AP_pascal", "AP_strict", "AP_small", "AP_medium", "AP_large", "AR_max_1", "AR_max_10", "AR_max_100", "AR_small", "AR_medium", "AR_large")
 class ModelMetricsAndLoggingBase(pl.callbacks.Callback):
@@ -167,6 +173,263 @@ class COCOEvaluationCallback(pl.Callback):
                 res = {target['image_id']: output for target, output in zip(targets, results)}
                 coco_eval.update(res)
 
+
+class ImageLoggingMixin(object):
+
+    def _format_image_name(self, module, stage, name="image_results"):
+        return f"{stage.value}_epoch={module.current_epoch}_step={module.global_step}_{name}"
+
+    def _log_image(self, pl_module:pl.LightningModule, stage, name, image):
+        name = self._format_image_name(pl_module, stage, name)
+        try:
+            pl_module.logger.experiment.add_figure(name, image)
+
+    def _prep_image(self, n):
+        if n < 4:
+            return plt.subplots(ncols=n, figsize=(10, 4))
+        else: 
+            ncols = 4 
+            nrows = ceil(n/ncols)
+            figsize = (10, 10//4*nrows)
+            return plt.subplots(ncols=ncols, nrows=nrows, figsize=figsize)
+
+
+
+class VisualizeAttentionOnImage(pl.Callback, ImageLoggingMixin):
+
+    def __init__(self, 
+        frequency=1, 
+        n_images=1, 
+        selector=None, 
+        on_training=False, 
+        on_validation=True, 
+        on_test=True, 
+        feature_layer_getter=None, 
+        encoder_layer_getter=None, 
+        decoder_layer_getter=None, 
+        dowsnsampling_factor=32
+    ):
+        self.f = frequency                  # step frequency 1 step = 1 batch
+        self.n = n_images                   # n <= batch_size!!
+        
+        self.selector = selector            # samples = selector(output, target)
+        self.on_training = on_training      # compute for training batches?
+        self.on_validation = on_validation  # compute for validation batches?
+        self.on_test = on_test
+
+        self.get_encoder_layer = encoder_layer_getter
+        self.get_decoder_layer = decoder_layer_getter
+        self.get_feature_layer = feature_layer_getter  
+
+        self.fct = dowsnsampling_factor
+
+        self._conv_features = torch.empty(0)
+        self._enc_attn_weights = torch.empty(0)
+        self._dec_attn_weights = torch.empty(0)
+
+        self._validate_init()
+
+    
+    def _validate_init(self):
+        assert callable(self.get_encoder_layer)
+        assert callable(self.get_encoder_layer)
+        assert callable(self.get_feature_layer)
+
+        if self.selector is not None:
+            assert callable(self.selector)
+    
+
+    def _reset_state(self):
+        for hook in self._registered_hooks: hook.remove()
+        
+        self._conv_features = torch.empty(0)
+        self._enc_attn_weights = torch.empty(0)
+        self._dec_attn_weights = torch.empty(0)
+        self._registered_hooks = []
+
+    def _add_hooks(self, module):
+        feature_layer:nn.Module = self.get_feature_layer(module)
+        encoder_layer:nn.Module = self.get_encoder_layer(module)
+        decoder_layer:nn.Module = self.get_decoder_layer(module)
+
+        feature_hook = feature_layer.register_forward_hook(
+            lambda it, ins, out: self._state.update({"conf_features": out})
+        )
+
+        encoder_hook = encoder_layer.register_forward_hook(
+            lambda it, ins, out: self._state.update({"enc_attn_weights": out[1]})
+        )
+
+        decoder_hook = decoder_layer.register_forward_hook(
+            lambda it, ins, out: self._state.update({"dec_attn_weights": out[1]})
+        )
+
+        self._registered_hooks.extend([feature_hook, encoder_hook, decoder_hook])
+
+    def _should_compute(self, stage, global_step):
+        return getattr(self, f"on_{stage.value}") and global_step % self.f == 0
+
+    def _compute_features(self):
+        shape = self.conv_features.shape[-2:]
+        self.enc_attn_weights = self.enc_attn_weights[0]
+        
+        return self.dec_attn_weights, 
+
+    def _get_bbox_reference_points(self, bbox):
+        pass
+
+
+    def _visualize_attention(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, *args, **kwargs):
+
+        inputs, targets = batch
+        matcher = pl_module.criterion.matcher 
+        indices = matcher(outputs, targets)
+        
+        
+        h, w = self.conv_features['0'].tensors.shape[-2:]
+        dec_attn = self.dec_attn_weights[0, idx].view(h, w)
+
+        fig, axs = plt.subplots(ncols=len(bboxes_scaled), nrows=2, figsize=(22, 7))
+        colors = COLORS * 100
+        for idx, ax_i, (xmin, ymin, xmax, ymax) in zip(keep.nonzero(), axs.T, bboxes_scaled):
+            ax = ax_i[0]
+            ax.imshow()
+            ax.axis('off')
+            ax.set_title(f'query id: {idx.item()}')
+            ax = ax_i[1]
+            ax.imshow(im)
+            ax.add_patch(plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin,
+                                    fill=False, color='blue', linewidth=3))
+            ax.axis('off')
+            ax.set_title(CLASSES[probas[idx].argmax()])
+        fig.tight_layout()
+  
+    def setup(self, trainer, pl_module, stage: str):
+
+        assert isinstance(nn.Module, self.get_feature_layer(pl_module))
+        assert isinstance(nn.Module, self.get_decoder_layer(pl_module))
+        assert isinstance(nn.Module, self.get_encoder_layer(pl_module))
+
+
+    def on_train_batch_start(self, trainer, pl_module, *args, **kwargs):
+        if self._should_compute(STAGE.TRAIN, pl_module.global_step): self._add_hooks()
+        
+
+    def on_validation_batch_start(self, _, pl_module, *args, **kwargs):
+        if self._should_compute(STAGE.VAL, pl_module.global_step): self._add_hooks()
+
+    def on_test_batch_start(self, _, pl_module, *args, **kwargs):
+        if self._should_compute(STAGE.TEST, pl_module.global_step): self._add_hooks()
+
+    def on_train_batch_end(self, trainer, pl_module, *args, **kwargs):
+        if self._should_compute(STAGE.TRAIN, pl_module.global_step): 
+            self._visualize_attention(trainer, pl_module, *args, **kwargs)
+            self._reset_state()
+
+    def on_validation_batch_end(self, trainer, pl_module, *args, **kwargs):
+        if self._should_compute(STAGE.VAL, pl_module.global_step): 
+            self._visualize_attention(trainer, pl_module, *args, **kwargs)
+            self._reset_state()
+
+    def on_test_batch_end(self, trainer, pl_module, *args, **kwargs):
+        if self._should_compute(STAGE.TEST, pl_module.global_step): 
+            self._visualize_attention(trainer, pl_module, *args, **kwargs)
+            self._reset_state()
+
+
+class VisualizeBBoxOnImage(pl.Callback):
+
+    def __init__(self, frequency=1, n_images=1, selector=None, on_training=False, on_validation=True, on_test=True):
+        self.f = frequency                  # step frequency 1 step = 1 batch
+        self.n = n_images                   # n <= batch_size!!
+        
+        if selector is not None:
+            assert callable(selector)
+
+        self.selector = selector            # samples = selector(output, target)
+        self.on_training = on_training      # compute for training batches?
+        self.on_validation = on_validation  # compute for validation batches?
+        self.on_test = on_test
+ 
+
+    def _log_image(self, pl_module:pl.LightningModule, image, prefix=""):
+        image_name = prefix + f"epoch={pl_module.current_epoch}_step={pl_module.global_step}_bboxes"
+        try:
+            pl_module.logger.experiment.add_figure(image_name, image)
+
+    def _prep_image(self, n):
+        if n < 4:
+            return plt.subplots(ncols=n, figsize=(10, 4))
+        else: 
+            ncols = 4 
+            nrows = ceil(n/ncols)
+            figsize = (10, 10//4*nrows)
+            return plt.subplots(ncols=ncols, nrows=nrows, figsize=figsize)
+
+    def _visualize_bbox_on_image(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, stage):
+        inputs, targets = batch
+        if self.selector is not None:
+            inputs, outputs, targets = self.selector(inputs, outputs, targets)
+        else:
+            inputs = inputs[:self.n]            
+            outputs = outputs[:self.n]
+            targets = targets[:self.n]
+
+        inputs = inputs.cpu()
+
+        image, plots = self._prep_image(len(targets))
+
+        (*_, ih, iw) = inputs.shape
+        scale =  torch.as_tensor((ih, iw, ih, iw))
+
+        indices = self.criterion.matcher(outputs, targets)
+        idx = self.criterion._get_src_permutation_idx(indices)
+        
+        src_boxes = outputs['pred_boxes'][idx]
+        tgt_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+
+        ious = ops.box_iou(ops.box_convert(src_boxes, "cxcywh", "xyxy"), ops.box_convert(tgt_boxes, "cxcywh", "xyxy")).diag()
+
+        for ax, im, out_bb, tgt_bb, iou in zip(plots, inputs, src_boxes, tgt_boxes, ious):
+
+            ax.imshow(im[0], "gray")
+
+            out_bb = out_bb.cpu()
+            tgt_bb = tgt_bb.cpu()
+            
+            tgt_boxes_scaled = tgt_bb * scale 
+            out_boxes_scaled = out_bb * scale
+                        
+            out_xywh = ops.box_convert(out_boxes_scaled, "cxcywh", "xywh")
+            tgt_xywh = ops.box_convert(tgt_boxes_scaled, "cxcywh", "xywh")
+
+
+            # print(tgt_xywh)
+            x, y, w, h = tgt_xywh.unbind()
+            tgt_rect = plt.Rectangle((y, x), h, w, fill=False, ec="darkgreen")
+
+            x, y, w, h = out_xywh.unbind()
+            out_rect = plt.Rectangle((y, x), h, w, fill=False, ec="orange")
+            
+            ax.add_patch(tgt_rect)
+            ax.add_patch(out_rect)
+
+            ax.text(y - 10, x, f"iou={iou:.2f}", fontsize=10, bbox=dict(facecolor='darkgreen', alpha=0.5))
+        
+        self._log_image(pl_module, image, prefix=stage.value)
+
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        if self.on_training and pl_module.global_step % self.f == 0: 
+            self._visualize_bbox_on_image(trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, STAGE.TRAIN)
+
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        if self.on_validation and pl_module.global_step % self.f == 0: 
+            self._visualize_bbox_on_image(trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, STAGE.VAL)
+
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        if self.on_test and pl_module.global_step% self.f == 0:
+            self._visualize_bbox_on_image(trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, STAGE.TEST)
 
 class BestAndWorstCaseCallback(pl.Callback):
 

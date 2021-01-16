@@ -20,4 +20,5 @@ experiment-*
 .mypy_cache/*
 not_tracked_dir/
 tmp/
+sample/
 .vscode

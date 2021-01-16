@@ -3,6 +3,7 @@
 Utilities for bounding box manipulation and GIoU.
 """
 from os import stat
+from scipy import ndimage
 import torch
 from torchvision.ops.boxes import box_area
 import warnings
@@ -227,6 +228,12 @@ def generalized_box_iou(boxes1, boxes2):
     """
     # degenerate boxes gives inf / nan results
     # so do an early check
+    if not (boxes1[:, 2:] >= boxes1[:, :2]).all():
+        print("hey")
+
+    if not (boxes2[:, 2:] >= boxes2[:, :2]).all():
+        print("hey")
+        
     assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
     assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
     iou, union = box_iou(boxes1, boxes2)
@@ -238,6 +245,28 @@ def generalized_box_iou(boxes1, boxes2):
     area = wh[:, :, 0] * wh[:, :, 1]
 
     return iou - (area - union) / area
+
+
+def mask_to_bbox(label_map, bbox_fmt="xyxy"):
+    objects = ndimage.find_objects(label_map) 
+    
+    bboxes = []
+    labels = []
+
+    for tgt, sls in enumerate(objects): 
+        if sls is not None:
+            left, right = zip(*((s.start, s.stop) for s in sls))
+            bboxes.append(list(left + right))
+            labels.append(tgt)
+
+    
+
+    bboxes = torch.as_tensor(bboxes, dtype=torch.float32)
+    labels = torch.as_tensor(labels, dtype=torch.long)
+
+    bboxes = convert(bboxes, "xyxy", bbox_fmt)
+
+    return labels, bboxes
 
 
 def masks_to_boxes(masks):

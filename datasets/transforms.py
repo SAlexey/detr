@@ -19,7 +19,7 @@ from util.misc import interpolate
 
 class ObjectSlice(tio.transforms.Transform):
 
-    def __init__(self, *args, obj_id=1, img_key="image", map_key="label_map", **kwargs):
+    def __init__(self, *args, obj_id=1, img_key="image", map_key="mask", **kwargs):
         super().__init__(*args, **kwargs)
         self.args_names = []
         self.obj_id = obj_id
@@ -38,6 +38,10 @@ class ObjectSlice(tio.transforms.Transform):
         subject[self.map_key].data = subject[self.map_key].data[:, sl].unsqueeze(0)
 
         return subject
+
+
+
+
 
 
 class LabelMapToBbox(tio.transforms.Transform):
@@ -62,7 +66,7 @@ class LabelMapToBbox(tio.transforms.Transform):
 
     """
 
-    def __init__(self, *args, max_tgt=0, map_key="label_map", tgt_key="labels", box_key="boxes", box_fmt="xyxy", tgt_map=None, **kwargs):
+    def __init__(self, *args, max_tgt=0, map_key="mask", tgt_key="labels", box_key="boxes", box_fmt="xyxy", tgt_map=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.args_names = []
         self.box_key = box_key
@@ -137,9 +141,9 @@ class LRFlip(tio.transforms.Transform):
         self.flip = tio.transforms.RandomFlip(axes=("LR",), flip_probability=1)
 
     def apply_transform(self, subject: tio.Subject):
-        assert "side" in subject
+        assert "side" in subject 
         
-        if subject["side"][0] == self.side:
+        if str(subject.side) == self.side:
             subject = self.flip(subject)
         return subject
 
