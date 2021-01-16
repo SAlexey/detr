@@ -1,17 +1,19 @@
 experiment:
-  name: MyFirstHydraExperiment
+  name: detr_resnet101_dc5_single_slice
   test: False
-  resume: False
+  resume: True
 
 trainer: 
   _target_: pytorch_lightning.Trainer
-  fast_dev_run: 0
-  gpus: 0 
-  max_epochs: 500
-  limit_train_batches: 100 
+  fast_dev_run: False
+  gpus: 1
+  max_epochs: 1000
+  # overfit_batches: 4
+  limit_train_batches: 100
   limit_val_batches: 10 
-  limit_test_batches: 100
+  limit_test_batches: 50
   num_sanity_val_steps: 1
+  # profiler: simple
 
 checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint
@@ -35,8 +37,8 @@ model:
 
 datamodule:
   _target_: datasets.oai.SegmentedKMRIOAIv00
-  batch_size: 4 
-  num_workers: 5 
+  batch_size: 8
+  num_workers: 6 
 
 matcher: 
   _target_: models.matcher.HungarianMatcher

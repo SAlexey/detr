@@ -1,19 +1,27 @@
 from models.detr import build
 from omegaconf.dictconfig import DictConfig
-import pytorch_lightning as pl
 from models.model import LitModel
+from pathlib import Path
 import hydra
-from hydra.utils import instantiate, call
+from hydra.utils import instantiate, call, to_absolute_path
 
 @hydra.main(config_path="conf", config_name="config")
 def main(cfg: DictConfig):
     
     datamodule = instantiate(cfg.datamodule)
     checkpoint = instantiate(cfg.checkpoint)
-    model, criterion, postprocessors = build(cfg)
+
+    resume = None
+    
+    if cfg.experiment.resume:
+        checkpoints = sorted(Path(to_absolute_path("outputs")).rglob(f"checkpoints/**/{cfg.experiment.name}/**/*.ckpt"))
+        if checkpoints:
+            resume = str(checkpoints[-1])
+
+    model, criterion, _ = build(cfg)
     model = LitModel(model, criterion, cfg.hparams)
 
-    trainer = instantiate(cfg.trainer, callbacks=[checkpoint])
+    trainer = instantiate(cfg.trainer, callbacks=[checkpoint], resume_from_checkpoint=resume)
     trainer.fit(model, datamodule=datamodule)
     
     if cfg.experiment.test:

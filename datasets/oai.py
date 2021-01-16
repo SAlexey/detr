@@ -1,25 +1,28 @@
 
-from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar, Union
-import torch
-import torchio as tio 
-import pytorch_lightning as pl
+import multiprocessing as mp
 from pathlib import Path
+from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar, Union
+import numpy as np
+
 import pandas as pd
+import pytorch_lightning as pl
+import torch
+import torchio as tio
 from scipy import ndimage
-from torch.utils.data import random_split, DataLoader, Dataset, Subset
-from multiprocessing import Pool
+from torch.utils.data import DataLoader, Dataset, Subset, random_split
+from torchio.data.image import LabelMap
+from util.box_ops import mask_to_bbox
 from util.misc import nested_tensor_from_tensor_list
+
 from .transforms import *
 
 T = TypeVar("T")
 TrFunc = Callable[[T], T]
 SetupFunc = Callable[[pl.LightningDataModule, Optional[str]], None]
 
+DICOM_SRC = Path("/scratch/visual/ashestak/oai/v00/dicom/")
+NUMPY_SRC = Path("/scratch/visual/ashestak/oai/v00/numpy/")
 
-def collate_fn(batch):
-    batch = list(zip(*batch))
-    batch[0] = nested_tensor_from_tensor_list(batch[0])
-    return tuple(batch)
 
 class TransformableSubset(Dataset):
     """
@@ -43,6 +46,89 @@ class TransformableSubset(Dataset):
 
     def __len__(self):
         return len(self.subset)
+
+
+class SubjectsDataset(Dataset):
+
+    def __init__(self, items, transform=None):
+        self.items = items 
+        self.transform = transform
+
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, idx):
+
+        item = np.load(self.items[idx])
+
+        image = tio.ScalarImage(tensor=item["image"], affine=item["affine"], spacing=item["spacing"])
+        image._loaded = True
+
+        mask = tio.LabelMap(tensor=item["mask"], affine=item["affine"], spacing=item["spacing"])
+        mask._loaded = True
+
+        subject = tio.Subject(image=image, mask=mask, id=str(item["id"]), side=str(item["side"]).lower())
+
+        if self.transform is not None:
+            subject = self.transform(subject)
+
+        return subject
+
+
+class MenisciDataset(Dataset):
+
+    def __init__(self, paths,  transform=None):
+        self.paths = paths
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, idx):
+        item = np.load(self.paths[idx])
+
+        mask = item["mask"].isin((5,6))
+
+        image = torch.as_tensor(item["image"], dtype=torch.float32)
+        mask = torch.as_tensor(mask, dtype=torch.long)
+
+        if self.transform is not None:
+            image, mask = self.transform((image, mask))
+
+        if mask.dtype != torch.long:
+            mask = mask.long()
+
+        mask = mask.isin((5,6))
+
+        objetcs = ndimage.find_objects(mask, max_label=6)
+        
+        
+
+
+
+
+class Subjects(TransformableSubset):
+
+    def __getitem__(self, idx: int):
+        item = super().__getitem__(idx)
+        w, h = item.image.shape[-2:]
+        
+        image = item.image.data.squeeze()
+        mask = item.mask.data.squeeze().long()
+
+        obj, *_ = next(o for o in ndimage.find_objects(mask) if o is not None)
+        slice = (obj.start + obj.stop) // 2
+        
+        image = image[slice, ...]
+        mask = mask[slice, ...]
+
+        tgt, bbox = mask_to_bbox(mask, bbox_fmt="ccwh")
+        image = image.unsqueeze(0)
+        bbox = bbox / torch.as_tensor((w, h, w, h), dtype=torch.float32)
+
+        return image, { "boxes": bbox, "labels": tgt, "num_objects": len(tgt) }
+
 
 class SegmentedKMRIOAIv00(pl.LightningDataModule):         
 
@@ -113,20 +199,15 @@ class SegmentedKMRIOAIv00(pl.LightningDataModule):
             shuffle=False
         )
 
-    
     def setup(self, stage=None):
-        
-        failed = pd.read_csv("/scratch/visual/ashestak/oai/v00/numpy/full/failed.csv")
-        failed = failed.groupby(["Unnamed: 0"]).get_group("path")["0"].values
 
-        subjects = subjects_from_dicom(num_workers=self.num_workers, ignore_paths=failed)
+        index = pd.read_csv("/scratch/visual/ashestak/oai/v00/numpy/index.csv", header=[0])["0"]
+        index = index.str.cat(["/subject.npz",] * len(index))
+        
 
         transforms = tio.Compose([
             LRFlip(),                                        # flips left knee to right 
-            tio.ToCanonical(),                               # puts axis defining sag-plane first
-            tio.RescaleIntensity(percentiles=[0.5, 99.5]),   # rescales intensity to be in [0, 1]
-            tio.ZNormalization(),                            # sets mean 0 and std 1 
-            tio.RemapLabels({1:0, 2:0, 3:0, 4:0, 5:1, 6:0}), # only one meniscus is nonzero
+            tio.RemapLabels({1:0, 2:0, 3:0, 4:0, 5:1, 6:2}), # only one meniscus is nonzero
         ] + self.train_transforms)
 
         train_transforms = tio.Compose([
@@ -144,19 +225,13 @@ class SegmentedKMRIOAIv00(pl.LightningDataModule):
             ),
             tio.RandomFlip(axes=("AP", "IS")),              # Anterior-Posterior Interior-Superior flips
             tio.Crop((0, 42, 42)),                          # crop image to (160, 300, 300) 
-            ObjectSlice(),                                  # get middle slice of meniscus
-            LabelMapToBbox(box_fmt="ccwh"),                 # extracts bbox 
-            NormalizeBbox(img_size=(300, 300))              # scale bbox by the image size
         ] + self.train_transforms)
 
         val_transforms = tio.Compose([
-            tio.Crop((0, 42, 42)),                          # crop image to (160, 300, 300) 
-            ObjectSlice(),                                  # get middle slice of meniscus
-            LabelMapToBbox(box_fmt="ccwh"),                 # extracts bbox 
-            NormalizeBbox(img_size=(300, 300))              # scale bbox by the image size
+            tio.Crop((0, 42, 42)),                          # crop image to (160, 300, 300)
         ] + self.val_transforms)
 
-        full_dataset = tio.SubjectsDataset(subjects, transform=transforms)
+        full_dataset = SubjectsDataset(index, transform=transforms)
 
         num_total = len(full_dataset)
         num_test = int(round(num_total * 0.25))
@@ -167,52 +242,52 @@ class SegmentedKMRIOAIv00(pl.LightningDataModule):
 
         train_subset, val_subset, test_subset = random_split(full_dataset, (num_train, num_val, num_test))
 
-        self.train_dataset = TransformableSubset(train_subset, transform=train_transforms)
-        self.val_dataset = TransformableSubset(val_subset, transform=val_transforms)
-        self.test_dataset = TransformableSubset(test_subset, transform=val_transforms)
+        self.train_dataset = Subjects(train_subset, transform=train_transforms)
+        self.val_dataset = Subjects(val_subset, transform=val_transforms)
+        self.test_dataset = Subjects(test_subset, transform=val_transforms)
+
+
+def subject_from_row(row:Dict[str, Any]):
+    
+    return tio.Subject(
+        image=tio.ScalarImage(str(DICOM_SRC / row["path"] / "Image")),
+        mask=tio.LabelMap(str(DICOM_SRC / row["path"] / "Segmentation")), 
+        side=row["side"].lower(),
+        id=row["id"]
+    )
 
 
 def subjects_from_dicom(num_workers=1, ignore_paths=[]):
     """
         Reads the following files:
 
-        /vis/scratchN/oaiDataBase/v00/OAI/statistics/SAG_3D_DESS_LEFT
-        /vis/scratchN/oaiDataBase/v00/OAI/statistics/SAG_3D_DESS_RIGHT
+        /scratch/visual/ashestak/oai/v00/dicom/statistics/SAG_3D_DESS_LEFT
+        /scratch/visual/ashestak/oai/v00/dicom/statistics/SAG_3D_DESS_RIGHT
 
         concatennates them together into a single pandas dataframe
         creates a list of subjects containing keys
          - image:  mri images
-         - label_map: segmentation
+         - mask: segmentation
          - id: patient id
          - side: leg side
-    """
+    """  
 
-    src_img = Path("/vis/scratchN/oaiDataBase/v00/OAI/")
-    src_msk = Path("/vis/scratchN/bzftacka/OAI_DESS_Data_AllTPs/Merged/v00/OAI")
-
-    statLeft = pd.read_csv(src_img/"statistics/SAG_3D_DESS_LEFT", sep=" ", header=None)
-    statRight = pd.read_csv(src_img/"statistics/SAG_3D_DESS_RIGHT", sep=" ", header=None)
+    statLeft = pd.read_csv(DICOM_SRC/"statistics/SAG_3D_DESS_LEFT", sep=" ", header=None)
+    statRight = pd.read_csv(DICOM_SRC/"statistics/SAG_3D_DESS_RIGHT", sep=" ", header=None)
 
     stat = statLeft.append(statRight)
 
     stat["id"] = stat[0].str.extract(r"(\d{7})")
-    stat["side"] = stat[1].map(lambda s: s.split("_")[-1]).str.lower()
+    stat["side"] = stat[1].str.extract(r"([A-Z]+$)")
     
     stat.rename({0: "path"}, axis=1, inplace=True)
-    stat["path"] = stat["path"].map(Path)
-
-    stat["image"] = stat["path"].map(lambda p: tio.ScalarImage(src_img/p))
-    stat["label_map"] = stat["path"].map(lambda p: tio.LabelMap(src_msk/p/"Segmentation"))
-
     stat.mask(stat["path"].isin(ignore_paths), inplace=True)
     stat.dropna(inplace=True, subset=["path"])
-    stat.drop([1, 2, "path"], axis=1, inplace=True)
-
-    print(f"Preparing Subjects (num_proc={num_workers})")
-    with Pool(num_workers) as pool:
-        subjects = list(pool.imap_unordered(tio.Subject, stat.to_dict(orient="records"), chunksize=500))
-    print("Done!")
-    return subjects
     
 
+    print(f"Preparing Subjects (num_proc={num_workers})")
+    with mp.Pool(num_workers) as pool:
+        subjects = list(pool.imap_unordered(subject_from_row, stat.to_dict(orient="records"), chunksize=500))
+    print("Done!")
+    return subjects
 
