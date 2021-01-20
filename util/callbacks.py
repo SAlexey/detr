@@ -2,29 +2,26 @@ import os
 import tempfile
 from collections import defaultdict
 from copy import copy
+from enum import Enum
+from math import ceil
 from pathlib import Path
 from typing import Callable, List
-from math import ceil
-from torch import nn
-
-import numpy as np
 
 import cv2
 import matplotlib.pyplot as plt
+import numpy as np
 import pytorch_lightning as pl
 import torch
-from datasets.coco import COCOWrapper
 from datasets.coco_eval import CocoEvaluator
 from models.detr import PostProcess
 from pycocotools.coco import COCO
-from pycocotools.cocoeval import COCOeval
+from torch import nn
+from torchvision import ops
 from torchvision.ops import box_iou
 from tqdm import tqdm
-from torchvision import ops
 
-from util.box_ops import BboxFormatter, box_cxcywh_to_xyxy
 from util.gradcam import GradCam
-from enum import Enum
+from util.metrics import DetectionAP
 
 STAGE = Enum("STAGE", (("TRAIN", "training"), ("VAL", "validation"), ("TEST", "test")))
 
@@ -119,7 +116,6 @@ def coco_gt_from_dataset(loader, device="cpu"):
     coco_api.createIndex()
     return coco_api
 
-
 class COCOEvaluationCallback(pl.Callback):
 
     def __init__(self, compute_frequency=10):
@@ -172,6 +168,93 @@ class COCOEvaluationCallback(pl.Callback):
                 results = self.postprocess(out, orig_target_sizes)
                 res = {target['image_id']: output for target, output in zip(targets, results)}
                 coco_eval.update(res)
+
+
+class EvaluateObjectDetection(pl.Callback):
+
+    def __init__(self, on_validation=True, on_training=False, on_test=False, setting="coco", classes=(1, ), weights=(1.0, )):
+        self.on_validation = on_validation
+        self.on_training = on_training
+        self.on_test = on_test 
+        self.setting = setting
+        self.classes = classes
+        self.weights = weights
+        self._features = {}
+        self._results = {}
+        self._init_features()
+        
+    def _init_features(self):
+        if self.setting == "coco":
+            iou_ths = torch.arange(0.5, 1.0, 0.05)
+        elif self.setting == "pascal_voc":
+            iou_ths = torch.arange(0.5, 1.0, 0.25)
+        else:
+            raise NotImplementedError()
+
+        for iou_thd in iou_ths:
+            for label, weight in zip(self.classes, self.weights):
+                self._features[f"{label}_{iou_thd}"] = DetectionAP(iou_thd, pos_tgt=label, pos_weight=weight)
+        
+
+    def _should_compute(self, stage):
+        return getattr(self, f"on_{stage.value}")
+
+    @torch.no_grad()
+    def _evaluate_features(self, stage, trainer, pl_module):
+        if not self._should_compute(stage): return
+
+        results = {}
+        scores = []
+
+        for name, feature in self._features.items():
+            score = feature.compute()
+            results[name] = score
+            scores.append(score)
+        
+        results["mAP"] = np.mean(scores)
+        self._results.update(results)
+
+            
+    @torch.no_grad()
+    def _compute_features(self, stage, trainer, pl_module, outputs, batch, *args, **kwargs):
+        if not self._should_compute(stage): return
+
+        _, targets = batch 
+
+        out_bboxes = outputs["pred_boxes"]
+        out_probas = outputs["pred_logits"]
+
+        tgt_bboxes = torch.cat([t["boxes"] for t in targets])
+        tgt_labels = torch.cat([t["labels"] for t in targets])
+        
+        out_bboxes = ops.box_convert(out_bboxes, "cxcywh", "xyxy")
+        tgt_bboxes = ops.box_convert(tgt_bboxes, "cxcywh", "xyxy")
+
+        for _, update in self._features.items():
+            update(out_bboxes, out_probas, tgt_bboxes, tgt_labels)
+
+
+    def on_train_batch_end(self, *args, **kwargs):
+        self._compute_features(STAGE.TRAIN, *args, **kwargs)
+
+    def on_validation_batch_end(self, *args, **kwargs):
+        self._compute_features(STAGE.VAL, *args, **kwargs)
+
+    def on_test_batch_end(self, *args, **kwargs):
+        self._compute_features(STAGE.TEST, *args, **kwargs)
+
+    def on_train_epoch_end(self, *args, **kwargs):
+        self._evaluate_features(STAGE.TRAIN, *args, **kwargs)
+    
+    def on_validation_epoch_end(self, *args, **kwargs):
+        self._evaluate_features(STAGE.VAL, *args, **kwargs)
+
+    def on_test_epoch_end(self, *args, **kwargs):
+        self._evaluate_features(STAGE.TEST, *args, **kwargs)
+    
+    
+
+    
 
 
 class ImageLoggingMixin(object):
