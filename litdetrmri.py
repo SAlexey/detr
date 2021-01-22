@@ -33,28 +33,33 @@ Use this to prototype quick ideas, then move to a script to scale up!
 #
 
 
-from scipy import ndimage
-from util.box_ops import mask_to_bbox
+import os
+from argparse import Namespace
+from enum import Enum
+from pathlib import Path
+from random import random
+from typing import List, Optional
 
+import albumentations as A
+import matplotlib.pyplot as plt
+import numpy as np
+import pytorch_lightning as pl
 import torch
+import torch.distributed as dist
+import torchvision
+from pytorch_lightning.metrics.functional import accuracy
+from scipy import ndimage
+from scipy.optimize import linear_sum_assignment
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import ops
-import pytorch_lightning as pl
-from pytorch_lightning.metrics.functional import accuracy
-import albumentations as A 
-from pathlib import Path
-import matplotlib.pyplot as plt
-import numpy as np
-from typing import List, Optional
-from scipy.optimize import linear_sum_assignment
-from enum import Enum
-from argparse import Namespace
-import torchvision
-import torch.distributed as dist
+
 from datasets.transforms_2d import *
-from random import random
+from util.box_ops import mask_to_bbox
+from util.callbacks import EvaluateObjectDetection
+
+# os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
 """## Utils
 
@@ -268,7 +273,7 @@ class SetCriterion(nn.Module):
         empty_weight[-1] = self.eos_coef
         self.register_buffer('empty_weight', empty_weight)
 
-    def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
+    def loss_labels(self, outputs, targets, indices, num_boxes, log=False):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
@@ -311,7 +316,9 @@ class SetCriterion(nn.Module):
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        target_boxes = torch.cat([
+            t['boxes'][i] 
+            for t, (_, i) in zip(targets, indices)], dim=0)
 
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
 
@@ -502,7 +509,7 @@ class LitDETRMRI(pl.LightningModule):
             matcher=HungarianMatcher(1, 2, 2), 
             weight_dict={"loss_bbox": 5, "loss_giou": 2},
             eos_coef=0.1, 
-            losses=["boxes"]
+            losses=["boxes", "labels"]
             )
         
         self.hparams = Namespace(lr_backbone=0.0001, lr_transformer=0.0001, lr=0.001, weight_decay=0.0001)
@@ -736,11 +743,17 @@ if __name__ == "__main__":
 
     # init model
     detr = LitDETRMRI()
-
-    resume = "/scratch/visual/ashestak/detr/lightning_logs/version_5555749/checkpoints/epoch=2100-step=32687.ckpt"
+    evaluate = EvaluateObjectDetection(on_training=True, num_classes=91)
+    resume =  None#"/scratch/visual/ashestak/detr/lightning_logs/version_5555749/checkpoints/epoch=2100-step=32687.ckpt"
 
     # Initialize a trainer
-    trainer = pl.Trainer(gpus=1, max_epochs=5000, progress_bar_refresh_rate=30, resume_from_checkpoint=resume)
+    trainer = pl.Trainer(gpus=0, 
+        max_epochs=5000, 
+        progress_bar_refresh_rate=30, 
+        resume_from_checkpoint=resume, 
+        overfit_batches=4, 
+        callbacks=[evaluate]
+    )
 
     # Train the model ⚡
 

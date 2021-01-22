@@ -22,6 +22,7 @@ from tqdm import tqdm
 
 from util.gradcam import GradCam
 from util.metrics import DetectionAP
+from mean_average_precision import MeanAveragePrecision
 
 STAGE = Enum("STAGE", (("TRAIN", "training"), ("VAL", "validation"), ("TEST", "test")))
 
@@ -116,403 +117,400 @@ def coco_gt_from_dataset(loader, device="cpu"):
     coco_api.createIndex()
     return coco_api
 
-class COCOEvaluationCallback(pl.Callback):
+# class COCOEvaluationCallback(pl.Callback):
 
-    def __init__(self, compute_frequency=10):
-        self.frequency = compute_frequency
+#     def __init__(self, compute_frequency=10):
+#         self.frequency = compute_frequency
 
-        self.coco_dts = defaultdict(lambda: {"images": [], "annotations": [], "categories": []})
-        self.coco_gts = defaultdict(COCO)
+#         self.coco_dts = defaultdict(lambda: {"images": [], "annotations": [], "categories": []})
+#         self.coco_gts = defaultdict(COCO)
 
-    def on_validation_epoch_start(self, trainer, pl_module):
-        if trainer.current_epoch == 1 or ( trainer.current_epoch % self.frequency == 0 ):
-            self.coco_eval = CocoEvaluator(self.coco_gt, ["bbox"])
+#     def on_validation_epoch_start(self, trainer, pl_module):
+#         if trainer.current_epoch == 1 or ( trainer.current_epoch % self.frequency == 0 ):
+#             self.coco_eval = CocoEvaluator(self.coco_gt, ["bbox"])
     
     
-    def on_validation_epoch_end(self, trainer, pl_module):
+#     def on_validation_epoch_end(self, trainer, pl_module):
 
-        # create coco_gt
-        if trainer.current_epoch == 1 or ( trainer.current_epoch % self.frequency == 0):
-            for key, coco_eval in self.coco_eval.items():
-                coco_eval.synchronize_between_processes()
-                coco_eval.accumulate()
-                coco_eval.summarize()
+#         # create coco_gt
+#         if trainer.current_epoch == 1 or ( trainer.current_epoch % self.frequency == 0):
+#             for key, coco_eval in self.coco_eval.items():
+#                 coco_eval.synchronize_between_processes()
+#                 coco_eval.accumulate()
+#                 coco_eval.summarize()
 
-                if trainer.logger is not None:
-                    save_dir = os.path.join(str(trainer.logger.save_dir), str(trainer.logger.name), f"version_{trainer.logger.version}")
-                    torch.save(
-                        coco_eval.coco_eval["bbox"], 
-                        os.path.join(save_dir, f"coco_evaluator_{key}_epoch_{trainer.current_epoch:03d}.pth")
-                    )
+#                 if trainer.logger is not None:
+#                     save_dir = os.path.join(str(trainer.logger.save_dir), str(trainer.logger.name), f"version_{trainer.logger.version}")
+#                     torch.save(
+#                         coco_eval.coco_eval["bbox"], 
+#                         os.path.join(save_dir, f"coco_evaluator_{key}_epoch_{trainer.current_epoch:03d}.pth")
+#                     )
                     
-                    trainer.logger.log_metrics({
-                        f"validation_{key}_{name}": value
-                        for name, value in zip(
-                        COCO_EVAL_NAMES,
-                        coco_eval.coco_eval['bbox'].stats.tolist())
-                    }, step=trainer.current_epoch)
+#                     trainer.logger.log_metrics({
+#                         f"validation_{key}_{name}": value
+#                         for name, value in zip(
+#                         COCO_EVAL_NAMES,
+#                         coco_eval.coco_eval['bbox'].stats.tolist())
+#                     }, step=trainer.current_epoch)
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):     
-        if self.current_epoch == 0:
-            pass
+#     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):     
+#         if self.current_epoch == 0:
+#             pass
 
-        _, targets = batch
-        out = outputs["output"]
-        if trainer.current_epoch == 1 or (trainer.current_epoch % self.frequency == 0):
-            for _, coco_eval in self.coco_eval.items():
-                orig_target_sizes = torch.stack([
-                    torch.tensor(tuple(t["orig_size"]), dtype=torch.int16) 
-                    for t in targets
-                ])
-                targets = [{k: v for k, v in t.items()} for t in targets]
-                results = self.postprocess(out, orig_target_sizes)
-                res = {target['image_id']: output for target, output in zip(targets, results)}
-                coco_eval.update(res)
+#         _, targets = batch
+#         out = outputs["output"]
+#         if trainer.current_epoch == 1 or (trainer.current_epoch % self.frequency == 0):
+#             for _, coco_eval in self.coco_eval.items():
+#                 orig_target_sizes = torch.stack([
+#                     torch.tensor(tuple(t["orig_size"]), dtype=torch.int16) 
+#                     for t in targets
+#                 ])
+#                 targets = [{k: v for k, v in t.items()} for t in targets]
+#                 results = self.postprocess(out, orig_target_sizes)
+#                 res = {target['image_id']: output for target, output in zip(targets, results)}
+#                 coco_eval.update(res)
 
 
-class EvaluateObjectDetection(pl.Callback):
+class EvaluateObjectDetection(pl.callbacks.Callback):
 
-    def __init__(self, on_validation=True, on_training=False, on_test=False, setting="coco", classes=(1, ), weights=(1.0, )):
+    def __init__(self, on_validation=True, on_training=False, on_test=False, setting="coco", num_classes=1,):
         self.on_validation = on_validation
         self.on_training = on_training
         self.on_test = on_test 
         self.setting = setting
-        self.classes = classes
-        self.weights = weights
-        self._features = {}
-        self._results = {}
-        self._init_features()
-        
-    def _init_features(self):
-        if self.setting == "coco":
-            iou_ths = torch.arange(0.5, 1.0, 0.05)
-        elif self.setting == "pascal_voc":
-            iou_ths = torch.arange(0.5, 1.0, 0.25)
-        else:
-            raise NotImplementedError()
-
-        for iou_thd in iou_ths:
-            for label, weight in zip(self.classes, self.weights):
-                self._features[f"{label}_{iou_thd}"] = DetectionAP(iou_thd, pos_tgt=label, pos_weight=weight)
-        
+        self._metric = MeanAveragePrecision(num_classes)    
+        self._result = None
+    
 
     def _should_compute(self, stage):
         return getattr(self, f"on_{stage.value}")
 
-    @torch.no_grad()
-    def _evaluate_features(self, stage, trainer, pl_module):
+    
+    def _evaluate_object_detection(self, stage, trainer, pl_module):
+
         if not self._should_compute(stage): return
 
-        results = {}
-        scores = []
-
-        for name, feature in self._features.items():
-            score = feature.compute()
-            results[name] = score
-            scores.append(score)
         
-        results["mAP"] = np.mean(scores)
-        self._results.update(results)
-
-            
-    @torch.no_grad()
-    def _compute_features(self, stage, trainer, pl_module, outputs, batch, *args, **kwargs):
+        self._result = self._metric.value(iou_thresholds=0.5, recall_thresholds=np.arange(0., 1.1, 0.1))
+        pass
+    
+    def _add_features(self, stage, trainer, pl_module, outputs, batch, *args, **kwargs):
         if not self._should_compute(stage): return
-
+        
+       
         _, targets = batch 
 
-        out_bboxes = outputs["pred_boxes"]
-        out_probas = outputs["pred_logits"]
+
+        indices = pl_module.criterion.matcher(outputs, targets)
+        idx = pl_module.criterion._get_src_permutation_idx(indices)
+
+        out_bboxes = outputs["pred_boxes"][idx]
+        out_probas = outputs["pred_logits"][idx]
+
+        out_probas = out_probas.softmax(-1)   # [batch_size * num_queries, num_classes]
 
         tgt_bboxes = torch.cat([t["boxes"] for t in targets])
         tgt_labels = torch.cat([t["labels"] for t in targets])
+
+        difficult = torch.zeros_like(tgt_labels)
+        crowd = torch.zeros_like(difficult)
         
         out_bboxes = ops.box_convert(out_bboxes, "cxcywh", "xyxy")
         tgt_bboxes = ops.box_convert(tgt_bboxes, "cxcywh", "xyxy")
 
-        for _, update in self._features.items():
-            update(out_bboxes, out_probas, tgt_bboxes, tgt_labels)
+        tgt = torch.stack([tgt_labels, difficult, crowd], -1)
+        tgt = torch.cat([tgt_bboxes, tgt], -1).cpu().numpy()
+
+        preds = out_probas.max(-1)
+        preds = torch.stack([preds.indices, preds.values], -1)
+        preds = torch.cat([tgt_bboxes, preds], -1).cpu().numpy()
+
+        self._metric.add(preds, tgt)
 
 
     def on_train_batch_end(self, *args, **kwargs):
-        self._compute_features(STAGE.TRAIN, *args, **kwargs)
+        self._add_features(STAGE.TRAIN, *args, **kwargs)
 
     def on_validation_batch_end(self, *args, **kwargs):
-        self._compute_features(STAGE.VAL, *args, **kwargs)
+        self._add_features(STAGE.VAL, *args, **kwargs)
 
     def on_test_batch_end(self, *args, **kwargs):
-        self._compute_features(STAGE.TEST, *args, **kwargs)
+        self._add_features(STAGE.TEST, *args, **kwargs)
 
     def on_train_epoch_end(self, *args, **kwargs):
-        self._evaluate_features(STAGE.TRAIN, *args, **kwargs)
+        self._evaluate_object_detection(STAGE.TRAIN, *args, **kwargs)
     
     def on_validation_epoch_end(self, *args, **kwargs):
-        self._evaluate_features(STAGE.VAL, *args, **kwargs)
+        self._evaluate_object_detection(STAGE.VAL, *args, **kwargs)
 
     def on_test_epoch_end(self, *args, **kwargs):
-        self._evaluate_features(STAGE.TEST, *args, **kwargs)
+        self._evaluate_object_detection(STAGE.TEST, *args, **kwargs)
     
     
 
     
 
 
-class ImageLoggingMixin(object):
+# class ImageLoggingMixin(object):
 
-    def _format_image_name(self, module, stage, name="image_results"):
-        return f"{stage.value}_epoch={module.current_epoch}_step={module.global_step}_{name}"
+#     def _format_image_name(self, module, stage, name="image_results"):
+#         return f"{stage.value}_epoch={module.current_epoch}_step={module.global_step}_{name}"
 
-    def _log_image(self, pl_module:pl.LightningModule, stage, name, image):
-        name = self._format_image_name(pl_module, stage, name)
-        try:
-            pl_module.logger.experiment.add_figure(name, image)
+#     def _log_image(self, pl_module:pl.LightningModule, stage, name, image):
+#         name = self._format_image_name(pl_module, stage, name)
+#         try:
+#             pl_module.logger.experiment.add_figure(name, image)
+#         except:
+#             pass
 
-    def _prep_image(self, n):
-        if n < 4:
-            return plt.subplots(ncols=n, figsize=(10, 4))
-        else: 
-            ncols = 4 
-            nrows = ceil(n/ncols)
-            figsize = (10, 10//4*nrows)
-            return plt.subplots(ncols=ncols, nrows=nrows, figsize=figsize)
+#     def _prep_image(self, n):
+#         if n < 4:
+#             return plt.subplots(ncols=n, figsize=(10, 4))
+#         else: 
+#             ncols = 4 
+#             nrows = ceil(n/ncols)
+#             figsize = (10, 10//4*nrows)
+#             return plt.subplots(ncols=ncols, nrows=nrows, figsize=figsize)
 
 
 
-class VisualizeAttentionOnImage(pl.Callback, ImageLoggingMixin):
+# class VisualizeAttentionOnImage(pl.Callback, ImageLoggingMixin):
 
-    def __init__(self, 
-        frequency=1, 
-        n_images=1, 
-        selector=None, 
-        on_training=False, 
-        on_validation=True, 
-        on_test=True, 
-        feature_layer_getter=None, 
-        encoder_layer_getter=None, 
-        decoder_layer_getter=None, 
-        dowsnsampling_factor=32
-    ):
-        self.f = frequency                  # step frequency 1 step = 1 batch
-        self.n = n_images                   # n <= batch_size!!
+#     def __init__(self, 
+#         frequency=1, 
+#         n_images=1, 
+#         selector=None, 
+#         on_training=False, 
+#         on_validation=True, 
+#         on_test=True, 
+#         feature_layer_getter=None, 
+#         encoder_layer_getter=None, 
+#         decoder_layer_getter=None, 
+#         dowsnsampling_factor=32
+#     ):
+#         self.f = frequency                  # step frequency 1 step = 1 batch
+#         self.n = n_images                   # n <= batch_size!!
         
-        self.selector = selector            # samples = selector(output, target)
-        self.on_training = on_training      # compute for training batches?
-        self.on_validation = on_validation  # compute for validation batches?
-        self.on_test = on_test
+#         self.selector = selector            # samples = selector(output, target)
+#         self.on_training = on_training      # compute for training batches?
+#         self.on_validation = on_validation  # compute for validation batches?
+#         self.on_test = on_test
 
-        self.get_encoder_layer = encoder_layer_getter
-        self.get_decoder_layer = decoder_layer_getter
-        self.get_feature_layer = feature_layer_getter  
+#         self.get_encoder_layer = encoder_layer_getter
+#         self.get_decoder_layer = decoder_layer_getter
+#         self.get_feature_layer = feature_layer_getter  
 
-        self.fct = dowsnsampling_factor
+#         self.fct = dowsnsampling_factor
 
-        self._conv_features = torch.empty(0)
-        self._enc_attn_weights = torch.empty(0)
-        self._dec_attn_weights = torch.empty(0)
+#         self._conv_features = torch.empty(0)
+#         self._enc_attn_weights = torch.empty(0)
+#         self._dec_attn_weights = torch.empty(0)
 
-        self._validate_init()
+#         self._validate_init()
 
     
-    def _validate_init(self):
-        assert callable(self.get_encoder_layer)
-        assert callable(self.get_encoder_layer)
-        assert callable(self.get_feature_layer)
+#     def _validate_init(self):
+#         assert callable(self.get_encoder_layer)
+#         assert callable(self.get_encoder_layer)
+#         assert callable(self.get_feature_layer)
 
-        if self.selector is not None:
-            assert callable(self.selector)
+#         if self.selector is not None:
+#             assert callable(self.selector)
     
 
-    def _reset_state(self):
-        for hook in self._registered_hooks: hook.remove()
+#     def _reset_state(self):
+#         for hook in self._registered_hooks: hook.remove()
         
-        self._conv_features = torch.empty(0)
-        self._enc_attn_weights = torch.empty(0)
-        self._dec_attn_weights = torch.empty(0)
-        self._registered_hooks = []
+#         self._conv_features = torch.empty(0)
+#         self._enc_attn_weights = torch.empty(0)
+#         self._dec_attn_weights = torch.empty(0)
+#         self._registered_hooks = []
 
-    def _add_hooks(self, module):
-        feature_layer:nn.Module = self.get_feature_layer(module)
-        encoder_layer:nn.Module = self.get_encoder_layer(module)
-        decoder_layer:nn.Module = self.get_decoder_layer(module)
+#     def _add_hooks(self, module):
+#         feature_layer:nn.Module = self.get_feature_layer(module)
+#         encoder_layer:nn.Module = self.get_encoder_layer(module)
+#         decoder_layer:nn.Module = self.get_decoder_layer(module)
 
-        feature_hook = feature_layer.register_forward_hook(
-            lambda it, ins, out: self._state.update({"conf_features": out})
-        )
+#         feature_hook = feature_layer.register_forward_hook(
+#             lambda it, ins, out: self._state.update({"conf_features": out})
+#         )
 
-        encoder_hook = encoder_layer.register_forward_hook(
-            lambda it, ins, out: self._state.update({"enc_attn_weights": out[1]})
-        )
+#         encoder_hook = encoder_layer.register_forward_hook(
+#             lambda it, ins, out: self._state.update({"enc_attn_weights": out[1]})
+#         )
 
-        decoder_hook = decoder_layer.register_forward_hook(
-            lambda it, ins, out: self._state.update({"dec_attn_weights": out[1]})
-        )
+#         decoder_hook = decoder_layer.register_forward_hook(
+#             lambda it, ins, out: self._state.update({"dec_attn_weights": out[1]})
+#         )
 
-        self._registered_hooks.extend([feature_hook, encoder_hook, decoder_hook])
+#         self._registered_hooks.extend([feature_hook, encoder_hook, decoder_hook])
 
-    def _should_compute(self, stage, global_step):
-        return getattr(self, f"on_{stage.value}") and global_step % self.f == 0
+#     def _should_compute(self, stage, global_step):
+#         return getattr(self, f"on_{stage.value}") and global_step % self.f == 0
 
-    def _compute_features(self):
-        shape = self.conv_features.shape[-2:]
-        self.enc_attn_weights = self.enc_attn_weights[0]
+#     def _compute_features(self):
+#         shape = self.conv_features.shape[-2:]
+#         self.enc_attn_weights = self.enc_attn_weights[0]
         
-        return self.dec_attn_weights, 
+#         return self.dec_attn_weights, 
 
-    def _get_bbox_reference_points(self, bbox):
-        pass
+#     def _get_bbox_reference_points(self, bbox):
+#         pass
 
 
-    def _visualize_attention(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, *args, **kwargs):
+#     def _visualize_attention(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, *args, **kwargs):
 
-        inputs, targets = batch
-        matcher = pl_module.criterion.matcher 
-        indices = matcher(outputs, targets)
+#         inputs, targets = batch
+#         matcher = pl_module.criterion.matcher 
+#         indices = matcher(outputs, targets)
         
         
-        h, w = self.conv_features['0'].tensors.shape[-2:]
-        dec_attn = self.dec_attn_weights[0, idx].view(h, w)
+#         h, w = self.conv_features['0'].tensors.shape[-2:]
+#         dec_attn = self.dec_attn_weights[0, idx].view(h, w)
 
-        fig, axs = plt.subplots(ncols=len(bboxes_scaled), nrows=2, figsize=(22, 7))
-        colors = COLORS * 100
-        for idx, ax_i, (xmin, ymin, xmax, ymax) in zip(keep.nonzero(), axs.T, bboxes_scaled):
-            ax = ax_i[0]
-            ax.imshow()
-            ax.axis('off')
-            ax.set_title(f'query id: {idx.item()}')
-            ax = ax_i[1]
-            ax.imshow(im)
-            ax.add_patch(plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin,
-                                    fill=False, color='blue', linewidth=3))
-            ax.axis('off')
-            ax.set_title(CLASSES[probas[idx].argmax()])
-        fig.tight_layout()
+#         fig, axs = plt.subplots(ncols=len(bboxes_scaled), nrows=2, figsize=(22, 7))
+#         colors = COLORS * 100
+#         for idx, ax_i, (xmin, ymin, xmax, ymax) in zip(keep.nonzero(), axs.T, bboxes_scaled):
+#             ax = ax_i[0]
+#             ax.imshow()
+#             ax.axis('off')
+#             ax.set_title(f'query id: {idx.item()}')
+#             ax = ax_i[1]
+#             ax.imshow(im)
+#             ax.add_patch(plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin,
+#                                     fill=False, color='blue', linewidth=3))
+#             ax.axis('off')
+#             ax.set_title(CLASSES[probas[idx].argmax()])
+#         fig.tight_layout()
   
-    def setup(self, trainer, pl_module, stage: str):
+#     def setup(self, trainer, pl_module, stage: str):
 
-        assert isinstance(nn.Module, self.get_feature_layer(pl_module))
-        assert isinstance(nn.Module, self.get_decoder_layer(pl_module))
-        assert isinstance(nn.Module, self.get_encoder_layer(pl_module))
+#         assert isinstance(nn.Module, self.get_feature_layer(pl_module))
+#         assert isinstance(nn.Module, self.get_decoder_layer(pl_module))
+#         assert isinstance(nn.Module, self.get_encoder_layer(pl_module))
 
 
-    def on_train_batch_start(self, trainer, pl_module, *args, **kwargs):
-        if self._should_compute(STAGE.TRAIN, pl_module.global_step): self._add_hooks()
+#     def on_train_batch_start(self, trainer, pl_module, *args, **kwargs):
+#         if self._should_compute(STAGE.TRAIN, pl_module.global_step): self._add_hooks()
         
 
-    def on_validation_batch_start(self, _, pl_module, *args, **kwargs):
-        if self._should_compute(STAGE.VAL, pl_module.global_step): self._add_hooks()
+#     def on_validation_batch_start(self, _, pl_module, *args, **kwargs):
+#         if self._should_compute(STAGE.VAL, pl_module.global_step): self._add_hooks()
 
-    def on_test_batch_start(self, _, pl_module, *args, **kwargs):
-        if self._should_compute(STAGE.TEST, pl_module.global_step): self._add_hooks()
+#     def on_test_batch_start(self, _, pl_module, *args, **kwargs):
+#         if self._should_compute(STAGE.TEST, pl_module.global_step): self._add_hooks()
 
-    def on_train_batch_end(self, trainer, pl_module, *args, **kwargs):
-        if self._should_compute(STAGE.TRAIN, pl_module.global_step): 
-            self._visualize_attention(trainer, pl_module, *args, **kwargs)
-            self._reset_state()
+#     def on_train_batch_end(self, trainer, pl_module, *args, **kwargs):
+#         if self._should_compute(STAGE.TRAIN, pl_module.global_step): 
+#             self._visualize_attention(trainer, pl_module, *args, **kwargs)
+#             self._reset_state()
 
-    def on_validation_batch_end(self, trainer, pl_module, *args, **kwargs):
-        if self._should_compute(STAGE.VAL, pl_module.global_step): 
-            self._visualize_attention(trainer, pl_module, *args, **kwargs)
-            self._reset_state()
+#     def on_validation_batch_end(self, trainer, pl_module, *args, **kwargs):
+#         if self._should_compute(STAGE.VAL, pl_module.global_step): 
+#             self._visualize_attention(trainer, pl_module, *args, **kwargs)
+#             self._reset_state()
 
-    def on_test_batch_end(self, trainer, pl_module, *args, **kwargs):
-        if self._should_compute(STAGE.TEST, pl_module.global_step): 
-            self._visualize_attention(trainer, pl_module, *args, **kwargs)
-            self._reset_state()
+#     def on_test_batch_end(self, trainer, pl_module, *args, **kwargs):
+#         if self._should_compute(STAGE.TEST, pl_module.global_step): 
+#             self._visualize_attention(trainer, pl_module, *args, **kwargs)
+#             self._reset_state()
 
 
-class VisualizeBBoxOnImage(pl.Callback):
+# class VisualizeBBoxOnImage(pl.Callback):
 
-    def __init__(self, frequency=1, n_images=1, selector=None, on_training=False, on_validation=True, on_test=True):
-        self.f = frequency                  # step frequency 1 step = 1 batch
-        self.n = n_images                   # n <= batch_size!!
+#     def __init__(self, frequency=1, n_images=1, selector=None, on_training=False, on_validation=True, on_test=True):
+#         self.f = frequency                  # step frequency 1 step = 1 batch
+#         self.n = n_images                   # n <= batch_size!!
         
-        if selector is not None:
-            assert callable(selector)
+#         if selector is not None:
+#             assert callable(selector)
 
-        self.selector = selector            # samples = selector(output, target)
-        self.on_training = on_training      # compute for training batches?
-        self.on_validation = on_validation  # compute for validation batches?
-        self.on_test = on_test
+#         self.selector = selector            # samples = selector(output, target)
+#         self.on_training = on_training      # compute for training batches?
+#         self.on_validation = on_validation  # compute for validation batches?
+#         self.on_test = on_test
  
 
-    def _log_image(self, pl_module:pl.LightningModule, image, prefix=""):
-        image_name = prefix + f"epoch={pl_module.current_epoch}_step={pl_module.global_step}_bboxes"
-        try:
-            pl_module.logger.experiment.add_figure(image_name, image)
+#     def _log_image(self, pl_module:pl.LightningModule, image, prefix=""):
+#         image_name = prefix + f"epoch={pl_module.current_epoch}_step={pl_module.global_step}_bboxes"
+#         try:
+#             pl_module.logger.experiment.add_figure(image_name, image)
+#         except: 
+#             pass
 
-    def _prep_image(self, n):
-        if n < 4:
-            return plt.subplots(ncols=n, figsize=(10, 4))
-        else: 
-            ncols = 4 
-            nrows = ceil(n/ncols)
-            figsize = (10, 10//4*nrows)
-            return plt.subplots(ncols=ncols, nrows=nrows, figsize=figsize)
+#     def _prep_image(self, n):
+#         if n < 4:
+#             return plt.subplots(ncols=n, figsize=(10, 4))
+#         else: 
+#             ncols = 4 
+#             nrows = ceil(n/ncols)
+#             figsize = (10, 10//4*nrows)
+#             return plt.subplots(ncols=ncols, nrows=nrows, figsize=figsize)
 
-    def _visualize_bbox_on_image(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, stage):
-        inputs, targets = batch
-        if self.selector is not None:
-            inputs, outputs, targets = self.selector(inputs, outputs, targets)
-        else:
-            inputs = inputs[:self.n]            
-            outputs = outputs[:self.n]
-            targets = targets[:self.n]
+#     def _visualize_bbox_on_image(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, stage):
+#         inputs, targets = batch
+#         if self.selector is not None:
+#             inputs, outputs, targets = self.selector(inputs, outputs, targets)
+#         else:
+#             inputs = inputs[:self.n]            
+#             outputs = outputs[:self.n]
+#             targets = targets[:self.n]
 
-        inputs = inputs.cpu()
+#         inputs = inputs.cpu()
 
-        image, plots = self._prep_image(len(targets))
+#         image, plots = self._prep_image(len(targets))
 
-        (*_, ih, iw) = inputs.shape
-        scale =  torch.as_tensor((ih, iw, ih, iw))
+#         (*_, ih, iw) = inputs.shape
+#         scale =  torch.as_tensor((ih, iw, ih, iw))
 
-        indices = self.criterion.matcher(outputs, targets)
-        idx = self.criterion._get_src_permutation_idx(indices)
+#         indices = self.criterion.matcher(outputs, targets)
+#         idx = self.criterion._get_src_permutation_idx(indices)
         
-        src_boxes = outputs['pred_boxes'][idx]
-        tgt_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+#         src_boxes = outputs['pred_boxes'][idx]
+#         tgt_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
-        ious = ops.box_iou(ops.box_convert(src_boxes, "cxcywh", "xyxy"), ops.box_convert(tgt_boxes, "cxcywh", "xyxy")).diag()
+#         ious = ops.box_iou(ops.box_convert(src_boxes, "cxcywh", "xyxy"), ops.box_convert(tgt_boxes, "cxcywh", "xyxy")).diag()
 
-        for ax, im, out_bb, tgt_bb, iou in zip(plots, inputs, src_boxes, tgt_boxes, ious):
+#         for ax, im, out_bb, tgt_bb, iou in zip(plots, inputs, src_boxes, tgt_boxes, ious):
 
-            ax.imshow(im[0], "gray")
+#             ax.imshow(im[0], "gray")
 
-            out_bb = out_bb.cpu()
-            tgt_bb = tgt_bb.cpu()
+#             out_bb = out_bb.cpu()
+#             tgt_bb = tgt_bb.cpu()
             
-            tgt_boxes_scaled = tgt_bb * scale 
-            out_boxes_scaled = out_bb * scale
+#             tgt_boxes_scaled = tgt_bb * scale 
+#             out_boxes_scaled = out_bb * scale
                         
-            out_xywh = ops.box_convert(out_boxes_scaled, "cxcywh", "xywh")
-            tgt_xywh = ops.box_convert(tgt_boxes_scaled, "cxcywh", "xywh")
+#             out_xywh = ops.box_convert(out_boxes_scaled, "cxcywh", "xywh")
+#             tgt_xywh = ops.box_convert(tgt_boxes_scaled, "cxcywh", "xywh")
 
 
-            # print(tgt_xywh)
-            x, y, w, h = tgt_xywh.unbind()
-            tgt_rect = plt.Rectangle((y, x), h, w, fill=False, ec="darkgreen")
+#             # print(tgt_xywh)
+#             x, y, w, h = tgt_xywh.unbind()
+#             tgt_rect = plt.Rectangle((y, x), h, w, fill=False, ec="darkgreen")
 
-            x, y, w, h = out_xywh.unbind()
-            out_rect = plt.Rectangle((y, x), h, w, fill=False, ec="orange")
+#             x, y, w, h = out_xywh.unbind()
+#             out_rect = plt.Rectangle((y, x), h, w, fill=False, ec="orange")
             
-            ax.add_patch(tgt_rect)
-            ax.add_patch(out_rect)
+#             ax.add_patch(tgt_rect)
+#             ax.add_patch(out_rect)
 
-            ax.text(y - 10, x, f"iou={iou:.2f}", fontsize=10, bbox=dict(facecolor='darkgreen', alpha=0.5))
+#             ax.text(y - 10, x, f"iou={iou:.2f}", fontsize=10, bbox=dict(facecolor='darkgreen', alpha=0.5))
         
-        self._log_image(pl_module, image, prefix=stage.value)
+#         self._log_image(pl_module, image, prefix=stage.value)
 
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        if self.on_training and pl_module.global_step % self.f == 0: 
-            self._visualize_bbox_on_image(trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, STAGE.TRAIN)
+#     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+#         if self.on_training and pl_module.global_step % self.f == 0: 
+#             self._visualize_bbox_on_image(trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, STAGE.TRAIN)
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        if self.on_validation and pl_module.global_step % self.f == 0: 
-            self._visualize_bbox_on_image(trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, STAGE.VAL)
+#     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+#         if self.on_validation and pl_module.global_step % self.f == 0: 
+#             self._visualize_bbox_on_image(trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, STAGE.VAL)
 
-    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        if self.on_test and pl_module.global_step% self.f == 0:
-            self._visualize_bbox_on_image(trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, STAGE.TEST)
+#     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+#         if self.on_test and pl_module.global_step% self.f == 0:
+#             self._visualize_bbox_on_image(trainer, pl_module, outputs, batch, batch_idx, dataloader_idx, STAGE.TEST)
 
 class BestAndWorstCaseCallback(pl.Callback):
 

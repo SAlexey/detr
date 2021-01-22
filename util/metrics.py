@@ -104,16 +104,17 @@ class DetectionAP(pl.metrics.Metric):
         out = model(inputs)
         avg_precision(out["boxes"], out["probas"], targets["boxes"], targets["labels"])  # <- update the state
         """
+
+        
         
         iou = self._iou(out_boxes, tgt_boxes)   # compute iou values between target and output boxes
         
         iou = (iou >= self.iou_thd)             # binarize the iou vector
-        out =  out_probas[:, self.pos_label]    # only take column corresponding to the positive class
         
-        tgt = (tgt_labels == self.pos_label)    # binarize the target vector in one-vs-rest fashion  
+        tgt = (tgt_labels == self.pos_tgt)    # binarize the target vector in one-vs-rest fashion  
         tgt = tgt & iou                         # mask target with the iou values
 
-        self.out.append(out.float()) 
+        self.out.append(out_probas.float()) 
         self.tgt.append(tgt.long()) 
         
     def compute(self):
@@ -135,8 +136,8 @@ class DetectionAP(pl.metrics.Metric):
 
         sample_weight = None
 
-        if self.pos_weight is not None:
-            sample_weight = tgt * self.pos_weight
+        if self.weight is not None:
+            sample_weight = tgt * self.weight
         
         average_precision = average_precision_score(tgt, out, sample_weight=sample_weight)
         return average_precision
