@@ -10,7 +10,8 @@
 datasets/data/
 checkpoints/
 */logs/
-*log*/
+*log_*/
+**/log*
 **/sample*
 outputs/
 experiment-*
@@ -20,5 +21,7 @@ experiment-*
 .mypy_cache/*
 not_tracked_dir/
 tmp/
-sample/
+sample/**
 .vscode
+**/events*
+**/hparams*
