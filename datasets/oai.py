@@ -7,14 +7,18 @@ import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import torch
+from torch import nn
 import torchio as tio
 from scipy import ndimage
 from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torchio.data.image import LabelMap
+from torchvision import ops
 from util.box_ops import mask_to_bbox
 from util.misc import nested_tensor_from_tensor_list
+from torchvision.datasets import CocoDetection
+import albumentations as A
 
-from .transforms import *
+import datasets.transforms as TT
 
 T = TypeVar("T")
 TrFunc = Callable[[T], T]
@@ -290,3 +294,162 @@ def subjects_from_dicom(num_workers=1, ignore_paths=[]):
         subjects = list(pool.imap_unordered(subject_from_row, stat.to_dict(orient="records"), chunksize=500))
     print("Done!")
     return subjects
+
+
+def _slice_loader_fn(coco, img_id):
+    obj = coco.loadImgs(img_id)[0]
+    img = np.load(obj["file_name"])[obj["image_key"]]
+    img = np.squeeze(img)[obj["slice"]]
+    img = np.stack((img,)*3)
+    img = np.transpose(img, (1, 2, 0))
+    return img    
+
+
+def _volume_loader_fn(coco, img_id):
+    obj = coco.loadImgs(img_id)[0]
+    img = np.load(obj["file_name"])[obj["image_key"]]
+    img = np.squeeze(img)
+    img = np.transpose(img, (1, 2, 0))
+    return img
+
+class LitDetectionSet(CocoDetection):
+    
+    def __init__(self, *args, image_loader_fn=_slice_loader_fn, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.load_image = image_loader_fn
+    
+    def __getitem__(self, index:int):
+        coco = self.coco
+        img_id = self.ids[index]
+        ann_ids = coco.getAnnIds(imgIds=img_id)
+        img = self.load_image(coco, img_id)
+        tgt = coco.loadAnns(ann_ids)
+        
+        tgt = {'image_id': img_id, 'annotations': tgt}
+        img, tgt = self.prepare(img, tgt)
+
+
+        if self.transforms is not None:
+            img, tgt = self.transforms(img, tgt)
+
+        return img, tgt
+
+
+    def prepare(self, img, tgt):
+
+        h, w, _ = img.shape
+        anno = tgt.pop("annotations")
+
+        anno = [obj for obj in anno if 'iscrowd' not in obj or obj['iscrowd'] == 0]
+
+        bboxes = [obj["bbox"] for obj in anno]
+        labels = [obj["category_id"] for obj in anno]
+        areas = [obj["area"] for obj in anno]
+        iscrowd = [obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno]
+
+        bboxes = torch.as_tensor(bboxes, dtype=torch.float32)
+        labels = torch.as_tensor(labels, dtype=torch.int64)
+        areas = torch.as_tensor(areas, dtype=torch.float32)
+        iscrowd = torch.as_tensor(iscrowd, dtype=torch.int64)
+
+        bboxes = ops.box_convert(bboxes, "xywh", "xyxy")
+
+        keep = (bboxes[:, 3] > bboxes[:, 1]) & (bboxes[:, 2] > bboxes[:, 0])
+        
+        tgt["boxes"] = bboxes[keep]
+        tgt["labels"] = labels[keep]
+        tgt["area"] = areas[keep]
+        tgt["iscrowd"] = iscrowd[keep]
+
+        tgt["orig_size"] = torch.as_tensor([int(h), int(w)])
+        tgt["size"] = torch.as_tensor([int(h), int(w)])
+        
+        return img, tgt
+
+
+class LitDetectionData(pl.LightningDataModule):
+
+    def __init__(
+            self, 
+            *args, 
+            collate_fn: Optional[List[Callable[[Any], Any]]] = None,
+            batch_size: int = 1,
+            num_workers: int = 1,
+            **kwargs
+        ):
+
+        """
+        Initializes the data module
+        Parameters:
+            batch_size:     (int) batch size used in the DataLoader
+            num_workers:    (int) number of processes used in the DataLoader
+            collate_fn:     (list[callable]) function that collates the batch in the DataLoader
+            transforms:     (list[callable]) transforms on ALL splits
+
+            train_transforms: (callable) transforms ONLY on train split
+            val_transforms:   (callable) transforms ONLY on val split
+            test_transforms:  (callable) transforms ONLY on test split
+        """
+
+        super().__init__(*args, **kwargs)
+        self.collate_fn = collate_fn
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+
+
+    def train_dataloader(self):
+        return DataLoader(self.train_dataset, 
+            batch_size=self.batch_size, 
+            collate_fn=self.collate_fn,
+            num_workers=self.num_workers,
+            shuffle=True, 
+        )
+
+    def val_dataloader(self):
+        return DataLoader(self.val_dataset, 
+            batch_size=self.batch_size,
+            collate_fn=self.collate_fn,
+            num_workers=self.num_workers,
+            shuffle=False
+        )
+
+    def test_dataloader(self):
+        return DataLoader(self.test_dataset,
+            batch_size=self.batch_size,
+            colalte_fn=self.collate_fn,
+            num_workers=self.num_workers,
+            shuffle=False
+        )       
+
+    def setup(self, stage=None):
+
+        transforms = TT.Compose([
+            TT.ToTensor(), 
+            TT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
+
+        root = "/scratch/visual/ashestak/oai/v00/numpy"
+        anns = "/scratch/visual/ashestak/detr/m_slice_anns.json"
+
+        dataset = LitDetectionSet(root, anns,  transforms=transforms)
+       
+        num_total = len(dataset)
+        num_test = int(round(num_total * 0.2))
+        num_val = int(round(num_total * 0.1))
+        num_train = num_total - num_test - num_val
+
+        train, val, test = random_split(dataset, [num_train, num_val, num_test])
+
+        print(
+            f"Total: {num_total}", 
+            f"Train: {num_train}", 
+            f"Val:   {num_val}", 
+            f"Test:  {num_test}", 
+            sep="\n============\n"
+        )
+
+        self.train_dataset = train
+        self.val_dataset = val
+        self.test_dataset = test
+    
+        
